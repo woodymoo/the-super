@@ -171,6 +171,29 @@ custom interface needed, and it works from a phone.
 
 ---
 
+## 5.5. Running the tests
+
+```bash
+source .venv/bin/activate
+pytest                 # 32 tests, well under a second
+```
+
+They cover the deterministic layer: the rent timeline (per-tenant due days, the
+5-day cure period), payment verification (per-tenant amounts, verified /
+underpaid / overpaid / not found), the routing rules, and the ledger writes.
+No network, no model calls, and no dependence on the system clock — `today` is a
+parameter of `check_rent`, and PayPal access goes through the single
+`_lookup_transactions` seam, so both are injected in `tests/conftest.py`.
+
+The model-driven nodes are not asserted on. That is deliberate rather than a
+gap: their output shifts with the model version, and the whole architecture
+exists so that nothing with financial or legal consequences depends on it.
+
+⚠️ Every test redirects the ledger to a temp file (an autouse fixture). If you
+add a test that writes state, do not opt out of it — an earlier version was
+opt-in and one test wrote straight into `fixtures/ledger.json`, corrupting demo
+state and making an unrelated test fail through leftover data.
+
 ## 6. The three triggers
 
 ```bash

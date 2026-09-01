@@ -8,6 +8,7 @@ Switching between them is the single USE_LOCAL flag.
 """
 
 import json
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,7 +18,10 @@ DATA_DIR = Path(__file__).parent.parent / "fixtures"
 LEDGER_FILE = DATA_DIR / "ledger.json"
 TICKETS_FILE = DATA_DIR / "tickets.json"
 
-MEDIA_WAIT_HOURS = 48   # remind if photos still haven't arrived after this long
+# Remind if photos still haven't arrived after this long. Read from the
+# environment so it can be dropped to minutes while recording the demo without
+# editing code (see MEDIA_WAIT_HOURS in .env.example).
+MEDIA_WAIT_HOURS = float(os.environ.get("MEDIA_WAIT_HOURS", 48))
 
 
 def _load(path: Path, default: dict) -> dict:
@@ -59,18 +63,6 @@ def write_ledger(month: str, room_id: str, claimed_amount: float,
 
 def get_ledger(month: str) -> dict:
     return _load(LEDGER_FILE, {}).get(month, {})
-
-
-def get_unpaid_rooms(month: str, all_rooms: list[str]) -> list[str]:
-    """For the rent cycle: rooms with no payment claim yet this month."""
-    # An allowlist rather than a denylist: only an explicitly settled status
-    # counts as "no collection needed". This used to treat only
-    # `status == "missing"` as unpaid, which silently dropped disputed rooms —
-    # exactly the ones most in need of follow-up — out of the collection queue.
-    settled = {"claimed", "confirmed"}
-    paid = get_ledger(month)
-    return [r for r in all_rooms
-            if r not in paid or paid[r].get("status") not in settled]
 
 
 # ---------------------------------------------------------------- Tickets

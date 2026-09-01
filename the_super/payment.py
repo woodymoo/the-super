@@ -234,6 +234,7 @@ def gather_payment_context(node_input: PaymentClaim) -> PaymentContext:
         guessed_month=node_input.month,
         recent_matches=recent,
         has_recent_match=bool(recent),
+        recent_window_days=RECENT_WINDOW_DAYS,
         suggested_month=suggested,
         suggested_reason=reason,
         suggestion_is_certain=len(due_unsettled) <= 1,
@@ -301,18 +302,6 @@ def _shift_month(month: str, delta: int) -> str:
     return f"{y + (mm - 1) // 12}-{(mm - 1) % 12 + 1:02d}"
 
 
-def _recent_months(around: str, span: int = 3) -> list[str]:
-    """The months either side of `around`, ascending."""
-    y, m = (int(x) for x in around.split("-"))
-    out = []
-    for delta in range(-span, span + 1):
-        mm = m + delta
-        yy = y + (mm - 1) // 12
-        mm = (mm - 1) % 12 + 1
-        out.append(f"{yy}-{mm:02d}")
-    return out
-
-
 def send_month_question(node_input: str, ctx: Context):
     """Send the month question — a zero-risk action, so it may be sent automatically."""
     original = IncomingMessage.model_validate_json(ctx.user_content.parts[0].text)
@@ -329,6 +318,8 @@ def send_month_question(node_input: str, ctx: Context):
 # Comparing amounts is deterministic logic; handing it to a model would only
 # introduce uncertainty we don't need.
 
+# Fallback only. The amount due is per-tenant (each lease may differ), so this is
+# used solely when the roster has no record for the room — never as the norm.
 EXPECTED_RENT = 1000.00
 
 def verify_payment(node_input: PaymentClaim) -> PaymentVerification:
@@ -337,17 +328,24 @@ def verify_payment(node_input: PaymentClaim) -> PaymentVerification:
     total = sum(t["amount"] for t in txns)
     txn_id = txns[0]["txn_id"] if txns else None
 
+    # ⚠️ The amount due comes from that tenant's own rent_amount, not a global
+    # constant — leases may carry different amounts (CLAUDE.md, business facts).
+    # With a global constant, a tenant whose rent is $1200 paying in full would be
+    # judged "overpaid", silently escalated, and never sent a receipt.
+    tenant = get_tenant(node_input.room_id) or {}
+    expected = float(tenant.get("rent_amount", EXPECTED_RENT))
+
     if not txns:
         status, note = "not_found", (
             f"No deposit found for {node_input.tenant_email} in {node_input.month}. "
             "It may not have cleared yet, or the paying email may not match the file."
         )
-    elif abs(total - EXPECTED_RENT) < 0.01:
+    elif abs(total - expected) < 0.01:
         status, note = "verified", f"${total:.2f} found, matching the amount due."
-    elif total < EXPECTED_RENT:
+    elif total < expected:
         status, note = "amount_mismatch", (
-            f"${total:.2f} found, ${EXPECTED_RENT:.2f} due, "
-            f"${EXPECTED_RENT - total:.2f} outstanding."
+            f"${total:.2f} found, ${expected:.2f} due, "
+            f"${expected - total:.2f} outstanding."
         )
     else:
         status, note = "overpaid", f"${total:.2f} found, more than the amount due."
@@ -357,7 +355,7 @@ def verify_payment(node_input: PaymentClaim) -> PaymentVerification:
         month=node_input.month,
         month_stated=node_input.month_stated,
         claimed_amount=node_input.claimed_amount,
-        expected_amount=EXPECTED_RENT,
+        expected_amount=expected,
         found_amount=total if txns else None,
         found_date=txns[0]["date"] if txns else None,
         txn_id=txn_id,
@@ -496,24 +494,46 @@ Output only the body of the text message, with no surrounding commentary.""",
 )
 
 
+def record_claim(node_input: PaymentVerification) -> PaymentVerification:
+    """Write the payment ledger from the **verified** figures, then pass them on.
+
+    ⚠️ This runs before drafting, and that ordering is the point. The ledger entry
+    must come from PaymentVerification — the month, amount and txn_id that
+    verify_payment established — and never from a model output or from
+    datetime.now().
+
+    An earlier version wrote the ledger inside deliver_receipt, whose input is
+    only the drafted SMS text; with no verification in scope it fell back to the
+    current calendar month and wrote claimed_amount=0.0 / found_amount=None. A
+    tenant texting on 8/31 about September rent then landed in the August books —
+    exactly the misfiling this whole branch exists to prevent.
+
+    status is claimed, not confirmed: the tenant claims a payment and we found a
+    matching record, but "the landlord confirmed" is a separate act and the two
+    states must not be merged.
+
+    Idempotent — write_ledger overwrites the room's entry for that month, so a
+    framework retry cannot double-record.
+    """
+    write_ledger(
+        month=node_input.month,
+        room_id=node_input.room_id,
+        claimed_amount=node_input.claimed_amount,
+        found_amount=node_input.found_amount,
+        status="claimed",
+        txn_id=node_input.txn_id,
+    )
+    return node_input
+
+
 def deliver_receipt(node_input: str, ctx: Context):
-    """Save the receipt **as a Gmail draft** and write the payment ledger.
+    """Save the receipt **as a Gmail draft**. The ledger was already written by record_claim.
 
     ⚠️ Draft, do not send. A receipt is a financial record, and CLAUDE.md
     constraint 1 requires a human to hit send.
-    The ledger status is claimed, not confirmed — the tenant claims a payment and
-    we found a record, but "the landlord confirmed" is a separate action and the
-    two states must not be merged.
     """
     original = IncomingMessage.model_validate_json(ctx.user_content.parts[0].text)
     draft_id = draft_sms_reply(original.gmail_thread_id, node_input)
-    write_ledger(
-        month=f"{__import__('datetime').datetime.now():%Y-%m}",
-        room_id=original.room_id,
-        claimed_amount=0.0,
-        found_amount=None,
-        status="claimed",
-    )
     return Event(
         message=(f"💰 {original.room_id} receipt draft created (draft {draft_id})\n"
                  f"Ledger recorded as claimed. **It reaches the tenant only when "
@@ -552,10 +572,13 @@ payment_workflow = Workflow(
         }),
         (gather_payment_context, ask_month_agent, send_month_question),
         (verify_payment, verification_router),
+        # ⚠️ record_claim sits before draft_receipt on purpose: it is the last
+        # node that still holds the PaymentVerification, so it is the only place
+        # the ledger can be written from verified figures rather than guesses.
         (verification_router, {
-            "AUTO_RECEIPT": draft_receipt,
+            "AUTO_RECEIPT": record_claim,
             "ESCALATE": escalate_to_landlord,
         }),
-        (draft_receipt, deliver_receipt),
+        (record_claim, draft_receipt, deliver_receipt),
     ],
 )

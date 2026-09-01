@@ -129,7 +129,7 @@ what was technically possible.
 - **Not deployed.** It runs locally on a schedule. Cloud Run Jobs +
   Cloud Scheduler is the intended target and the entry point is already
   shaped for it (`main.py poll|digest|rent`), but deployment was cut for time.
-- **No test suite.** [TBD]
+- **Tests cover the deterministic layer only.** 32 tests over the rent timeline, payment verification, routing, and ledger writes — the judgments with financial or legal consequences. The model-driven nodes (classification, wording) are not asserted on, which is deliberate: their output varies by model version, and the architecture exists precisely so that nothing consequential depends on it. Run with `pytest`.
 
 ## What's next
 
