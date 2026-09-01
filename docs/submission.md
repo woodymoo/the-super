@@ -3,8 +3,8 @@
 **Track:** The Taskmaster
 **Built with:** Google Agent Development Kit (ADK) 2.0 graph workflows, Gemini, Gmail API
 
-> ⚠️ 草稿。事实性描述已对齐 2026-08-31 的实际代码,
-> 但叙述口吻请自己再过一遍。标 **【待定】** 的地方需要你决定。
+> ⚠️ Draft. The factual claims match the code as of 2026-08-31,
+> but give the narrative voice your own pass. Items marked **[TBD]** need your decision.
 
 ---
 
@@ -129,7 +129,7 @@ what was technically possible.
 - **Not deployed.** It runs locally on a schedule. Cloud Run Jobs +
   Cloud Scheduler is the intended target and the entry point is already
   shaped for it (`main.py poll|digest|rent`), but deployment was cut for time.
-- **No test suite.** 【待定】
+- **No test suite.** [TBD]
 
 ## What's next
 

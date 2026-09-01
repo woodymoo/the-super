@@ -1,71 +1,74 @@
-# 录制 Demo
+# Recording the Demo
 
-面向 Devpost 提交视频。总长 2.5–3 分钟,五段。
+For the Devpost submission video. 2.5–3 minutes total, in five segments.
 
-> 先读 [manual.md](manual.md) —— 尤其是「没有任何东西在后台运行」那节。
-> 系统是定时批处理,不是常驻服务;发了短信不跑 `main.py poll` 就没有任何反应。
+> Read [manual.md](manual.md) first — especially the "nothing is running in the
+> background" section. The system is scheduled batch processing, not a resident
+> service; if you send a text and don't run `main.py poll`, nothing happens.
 
 ---
 
-## 零、三种运行方式的区别(录之前务必分清)
+## 0. The three ways to run it (be clear on this before recording)
 
-| 命令 | 读真实 Gmail | 会发短信 | 在 demo 里的角色 |
+| Command | Reads real Gmail | Sends texts | Role in the demo |
 |---|---|---|---|
-| `python main.py poll` | ✅ | ✅ | 第 3 段:真实短信闭环 |
-| `python demo.py <场景>` | ❌ | ⚠️ DRY_RUN | 第 4 段:七个预设场景 |
-| `python demo.py rent <日期>` | ❌ | ❌ | 第 5 段:纯计算,模拟日期 |
+| `python main.py poll` | ✅ | ✅ | Segment 3: the real SMS round trip |
+| `python demo.py <scenario>` | ❌ | ⚠️ DRY_RUN | Segment 4: the preset scenarios |
+| `python demo.py rent <date>` | ❌ | ❌ | Segment 5: pure computation with a simulated date |
 
-`demo.py rent` **不需要另开窗口配合 `main.py`** —— 它完全不碰 Gmail,
-只是把房租状态算出来打印。三条路互相独立。
+`demo.py rent` **does not need a second window running `main.py`** — it never
+touches Gmail; it just computes the rent status and prints it. The three paths
+are independent.
 
 ---
 
-## 一、开录前(15 分钟)
+## 1. Before recording (15 minutes)
 
 ```bash
 cd the-super
 source .venv/bin/activate
 
-python authorize.py                          # 确认 OAuth token 没过期
-python -m the_super.fixtures_gen 2026-08     # mock 账本对齐当月
+python authorize.py                          # confirm the OAuth token hasn't expired
+python -m the_super.fixtures_gen 2026-08     # align the mock ledger with the month
 rm -f the_super/fixtures/tickets.json \
       the_super/fixtures/ledger.json \
-      the_super/fixtures/history_cursor.json  # 清掉调试残留
+      the_super/fixtures/history_cursor.json  # clear debugging leftovers
 ```
 
-### 检查清单
+### Checklist
 
-| 项 | 要求 |
+| Item | Requirement |
 |---|---|
-| `the_super/.env` 里 `DRY_RUN` | **保持 `true`**。演示时讲「所有外发都有安全开关」是加分项 |
-| OAuth token | Testing 状态下 7 天过期,当天必须重跑一次 `authorize.py` |
-| 名册脱敏 | `tenants.json` 里只有 1F-A 的**手机号**是真的(认领来信必须留),姓名邮箱已是假数据 |
-| Voice 转发 | Voice 设置里 `Forward messages to email` 必须开着 |
+| `DRY_RUN` in `the_super/.env` | **Keep it `true`.** Saying "every outbound message has a safety switch" during the demo is a plus |
+| OAuth token | Expires after 7 days while the app is in Testing, so re-run `authorize.py` on the day |
+| Roster redaction | In `tenants.json` only 1F-A's **phone number** is real (needed to claim the incoming message); names and emails are already fake |
+| Voice forwarding | `Forward messages to email` must be on in the Voice settings |
 
-### 准备一条真实来信
+### Prepare one real incoming message
 
-用你的手机给 Voice 号发一条**英文**短信,第 3 段要用:
+From your own phone, text the Voice number in **English** — segment 3 uses it:
 
 > `Hi, I just sent $1000 for this month's rent via PayPal.`
 
-### 不要出现在画面里
+### Must not appear on screen
 
-- **Gmail 界面** —— Voice 转发邮件的标题里有真实手机号
+- **The Gmail UI** — the subject line of a forwarded Voice email contains the real phone number
 - `the_super/fixtures/tenants.json`
-- `the_super/.env`、`token.json`、`credentials.json`
+- `the_super/.env`, `token.json`, `credentials.json`
 
-`python demo.py` 和 `main.py poll` 的终端输出是干净的,不含号码。
+Terminal output from `python demo.py` and `main.py poll` is clean and contains no
+phone numbers.
 
 ---
 
-## 二、五段结构
+## 2. The five segments
 
-### 第 1 段 · 问题(20 秒,纯口播)
+### Segment 1 · The problem (20 s, voiceover only)
 
 Five rooms. Tenants text about rent and repairs. The landlord rarely checks
 email. Nothing connects SMS, PayPal, and maintenance tickets.
 
-### 第 2 段 · 架构(40 秒)
+### Segment 2 · Architecture (40 s)
 
 ```bash
 python -c "
@@ -81,12 +84,13 @@ for wf in (root_agent, payment_workflow, maintenance_workflow):
 "
 ```
 
-然后翻到 `the_super/payment.py` 的 `verify_payment()` 停两秒。
+Then scroll to `verify_payment()` in `the_super/payment.py` and hold for two seconds.
 
-**要说的一句话:金额比对是 `if/else`,不是 prompt。**
-这是全片最重要的技术论点 —— 有财务后果的判断不交给模型自觉遵守。
+**The line to say: the amount comparison is `if/else`, not a prompt.**
+This is the most important technical claim in the video — judgments with
+financial consequences are not left to the model's good behavior.
 
-### 第 3 段 · 实盘(50 秒,最有说服力)
+### Segment 3 · Live run (50 s, the most convincing part)
 
 ```bash
 python -c "
@@ -95,177 +99,204 @@ from the_super.tools.gmail import read_new_messages
 for m in read_new_messages(): print(f'[{m.source}] {m.room_id}: {m.body}')"
 ```
 
-**建议分屏拍**:左边你的手机(刚发出的短信),右边终端(解析结果)。
-这段证明的是真实 Google Voice 短信穿过了整条管道,不是 mock 数据。
+**Suggested split screen:** your phone on the left (the text you just sent), the
+terminal on the right (the parsed result). This segment proves a real Google
+Voice SMS travelled through the whole pipeline — it is not mock data.
 
-### 第 4 段 · 三组对比(50 秒,最出彩)
+### Segment 4 · Three contrasts (50 s, the standout)
 
-每组都是"同一类消息、一个细节不同 → 完全不同的处理"。选两组录即可。
+Each pair is "the same kind of message, one detail different → a completely
+different outcome." Recording two of the pairs is enough.
 
-**组一 · 描述质量决定路径**
+**Pair 1 · Description quality decides the path**
 
 ```bash
 python demo.py fix-vague     # "The toilet is leaking."
-python demo.py fix-clear     # 完整描述漏水位置和时间
+python demo.py fix-clear     # full description of where and when it leaks
 ```
 
-前者索要照片,而且具体到拍哪里(base / behind the tank / supply line);
-后者直接生成派单简报,还列出要带的材料。
-**要说的:agent 知道自己什么时候信息不够。**
+The first asks for photos, and specifies exactly where (base / behind the tank /
+supply line); the second produces the dispatch brief directly, including the
+parts to bring.
+**The line to say: the agent knows when it doesn't have enough information.**
 
-**组二 · 一句话决定要不要自动处理**
+**Pair 2 · One sentence decides whether it may act automatically**
 
 ```bash
 python demo.py pay-ok        # "$1000 for September rent"
 python demo.py pay-nomonth   # "I just sent you the rent"
 ```
 
-同一个租客、同样一笔 $1000、账本里都查得到 —— 但后者没说是哪个月,
-系统**拒绝自动回执**,反而去查台账,然后问:
-"We have your August rent recorded already, so I'm assuming this one is
-for September — is that right?"
+Same tenant, same $1,000, found in the ledger either way — but the second never
+said which month, so the system **refuses to auto-send a receipt**. It checks
+PayPal, states what it found, and applies the deterministic allocation rule:
+"We've checked our PayPal account and see your $1,000 received on August 30.
+Since August rent is already settled, we'll apply this to September — let us know
+if you meant a different month."
 
-**要说的:房租是预付的,月末交的钱通常是下个月的。8/31 交的钱记成 8 月,
-整本台账就错位了。所以金额对得上也不够,月份不定就不能自动处理。**
+**The line to say: rent is paid in advance, so money sent at the end of a month
+is usually for the next one. Booking an 8/31 payment to August throws the whole
+ledger out of alignment. So a matching amount isn't enough — with the month
+undetermined, it can't be handled automatically.**
 
-**组三 · 该闭嘴的时候闭嘴**
+**Pair 3 · Knowing when to say nothing**
 
 ```bash
-python demo.py legal         # 提到律师、押金 14 天
+python demo.py legal         # mentions a lawyer and the 14-day deposit rule
 ```
 
-回复只有一句:"We've received your message and it's being reviewed.
+The reply is one sentence: "We've received your message and it's being reviewed.
 We'll follow up with you directly."
 
-押金该不该退、14 天对不对 —— 一个字都没碰。
-**要说的:这条短信将来可能被读给法官听,它唯一该证明的是"消息收到了"。**
+Whether the deposit should be returned, whether 14 days is correct — it touches
+none of it.
+**The line to say: this text may one day be read aloud to a judge, and the only
+thing it should prove is that the message was received.**
 
-### 第 5 段 · 时间线 + 安全边界(40 秒)
+### Segment 5 · Timeline + safety boundaries (40 s)
 
 ```bash
 python demo.py rent 2026-08-02
 python demo.py rent 2026-08-07
 ```
 
-每户按**自己合同的应付日**触发,不是全楼统一。
+Each unit triggers on **its own lease's due day**, not one date for the building.
 
-然后讲这条法律时间线:
+Then explain the legal timeline:
 
-> 逾期第 1 天发催缴,给 5 天补缴期。期满时正好逾期满 5 天 ——
-> 这才够资格走 14 天通知程序。**而 agent 到此为止,不生成 14 天通知**,
-> 因为短信不构成法定送达。
+> Collection goes out on day 1 of being late, with a 5-day cure period. When it
+> expires, the rent is exactly 5 days overdue — only then does it qualify for the
+> 14-day notice process. **And the agent stops there; it does not generate the
+> 14-day notice**, because an SMS does not constitute valid service.
 
-收尾三句:PayPal 是 mock · `DRY_RUN` 安全开关 · 无状态设计不烧常驻容器。
+Close with three lines: PayPal is mocked · the `DRY_RUN` safety switch · the
+stateless design doesn't burn a resident container.
 
 ---
 
-## 三、场景播放器
+## 3. The scenario player
 
-`demo.py` 是演示专用入口,不属于应用逻辑。
-所有场景用**假号码假邮箱**构造,不碰真实名册。
+`demo.py` is a demo-only entry point and not part of the application logic.
+Every scenario is constructed with **fake numbers and fake emails**; it never
+touches the real roster.
 
 ```bash
-python demo.py list                # 列出全部场景
-python demo.py fix-vague           # 跑单个
-python demo.py all                 # 依次跑完
-python demo.py rent 2026-08-04     # 模拟某天的房租周期
+python demo.py list                # list every scenario
+python demo.py fix-vague           # run one
+python demo.py all                 # run them all in order
+python demo.py rent 2026-08-04     # simulate the rent cycle on a given day
 ```
 
-### 消息场景(10 个)
+### Message scenarios (10)
 
-| 场景 | 来信(英文) | 预期路径 | 对租客 |
+| Scenario | Incoming text | Expected path | To the tenant |
 |---|---|---|---|
-| `pay-ok` | "$1000 for **September** rent" | 金额相符 → 起草回执 | 📝 草稿 |
-| `pay-nomonth` | "I just sent you the rent"(没说月份) | **查台账 → 带已知信息问月份** | ✅ 自动发 |
-| `pay-short` | "$600 for September rent" | 少付 → **不回执**,转人工 | 🚫 不回 |
-| `pay-none` | "I sent September rent yesterday" | 账本查无记录 → 转人工 | 🚫 不回 |
-| `pay-vague` | "can we talk about the money stuff" | 低置信度 → 安全阀 | ✅ 缓冲回复 |
-| `legal` | 提到律师、押金 14 天 | 涉及法律 → 不表态 | ✅ 缓冲回复 |
-| `lease` | 问提前搬走押金怎么算 | 涉及租约 → 交房东 | ✅ 缓冲回复 |
-| `fix-vague` | "The toilet is leaking." | 描述不清 → 索要照片 | ✅ 自动发 |
-| `fix-clear` | 完整描述漏水位置和时间 | 生成派单简报 | 🚫 待批准 |
-| `fix-urgent` | "The kitchen pipe burst ..." | urgent 定级 + 自救指引 | ✅ 自动发 |
+| `pay-ok` | "$1000 for **September** rent" | Amount matches → draft the receipt | 📝 draft |
+| `pay-nomonth` | "I just sent you the rent" (no month) | **Check PayPal → state what was found and how it applies** | ✅ auto-sent |
+| `pay-short` | "$600 for September rent" | Underpaid → **no receipt**, escalate | 🚫 no reply |
+| `pay-none` | "I sent September rent yesterday" | Nothing found in the ledger → escalate | 🚫 no reply |
+| `pay-vague` | "can we talk about the money stuff" | Low confidence → safety valve | ✅ holding reply |
+| `legal` | mentions a lawyer, the 14-day deposit rule | Legal matter → take no position | ✅ holding reply |
+| `lease` | asks how the deposit works if they leave early | Lease matter → hand to the landlord | ✅ holding reply |
+| `fix-vague` | "The toilet is leaking." | Description unclear → ask for photos | ✅ auto-sent |
+| `fix-clear` | full description of where and when it leaks | Produce the dispatch brief | 🚫 awaiting approval |
+| `fix-urgent` | "The kitchen pipe burst ..." | Urgent severity + self-help guidance | ✅ auto-sent |
 
-### 日期怎么模拟
+### How dates are simulated
 
-`check_rent(month, today)` 的 `today` 是**参数**不是 `datetime.now()`,
-所以直接传日期即可 —— 不用改系统时间,不用 freezegun。
+`today` in `check_rent(month, today)` is a **parameter**, not `datetime.now()`,
+so you just pass the date — no changing the system clock, no freezegun.
 
 ```bash
-python demo.py rent 2026-08-02   # 1F(应付 1 号)已逾期,2F/3F 未到期
-python demo.py rent 2026-08-04   # 2F(应付 3 号)进入逾期
-python demo.py rent 2026-08-07   # 5 户全部逾期
+python demo.py rent 2026-08-02   # 1F (due on the 1st) is late; 2F/3F not yet due
+python demo.py rent 2026-08-04   # 2F (due on the 3rd) becomes late
+python demo.py rent 2026-08-07   # all 5 units are late
 ```
 
-补缴截止日会跟着触发日往后推(8/2 触发 → 8/7 截止;8/4 触发 → 8/9 截止),
-这个细节值得录进去。
+The cure deadline moves with the trigger date (triggered 8/2 → due 8/7;
+triggered 8/4 → due 8/9), and that detail is worth capturing on video.
 
 ---
 
-## 三点五、Skills:措辞规范外置(值得单独讲 20 秒)
+## 3.5. Skills: wording standards kept outside the code (worth 20 s of its own)
 
-所有对租客说话的措辞规范不在代码里,在 `skills/tenant-sms/`:
+None of the wording standards for talking to tenants live in the code; they live
+in `skills/tenant-sms/`:
 
 ```
 skills/tenant-sms/
-├── SKILL.md                  ← 铁律 + 语气 + 目录(常驻上下文)
+├── SKILL.md                  ← hard rules + tone + the index (always in context)
 └── references/
-    ├── payment.md            ← 回执 / 月份不明的三种问法 / 少付 / 多付 / 查无记录
-    ├── maintenance.md        ← 按设备类型的照片对照表 + 紧急自救指引
-    ├── collections.md        ← 催缴各阶段 + 法律时间线
-    └── holding.md            ← 缓冲回复的四个档位
+    ├── payment.md            ← receipts / the branches for an unstated month / underpaid / overpaid / not found
+    ├── maintenance.md        ← the photo checklist by fixture type + emergency self-help
+    ├── collections.md        ← the collection stages + the legal timeline
+    └── holding.md            ← the four grades of holding reply
 ```
 
-用 ADK 2.0 的 Skills 机制(`SkillToolset`),**按需加载**:
-模型先看 `SKILL.md` 的目录,判断这次要哪个 reference 再去读。
+It uses the ADK 2.0 Skills mechanism (`SkillToolset`) and loads **on demand**: the
+model reads the index in `SKILL.md`, decides which reference this case needs, and
+then reads that one.
 
 ```
-instruction:  186 字符   ← 只剩"去读技能"的指路
-技能总内容:  6300+ 字符  ← 按需加载,不常驻
+instruction:      186 characters   ← only the pointer to "go read the skill"
+total skill text: 6300+ characters ← loaded on demand, not resident
 ```
 
-**demo 里可以这样证明它真的生效**:打开 `references/maintenance.md`,
-指出里面写的 "shut off the valve (turn clockwise)",然后跑 `fix-urgent`,
-输出里出现同一句话 —— 而 `clockwise` 这个词在整个代码库里只存在于那个 md 文件。
+**How to prove on camera that it is really in effect:** open
+`references/maintenance.md`, point at the line "shut off the valve (turn
+clockwise)", then run `fix-urgent` — the same phrase appears in the output, and
+the word `clockwise` exists nowhere else in the codebase but that markdown file.
 
-**要说的一句话:措辞归 Skill,判定不归。**
-"金额相不相符""能不能自动发"仍然是确定性代码。改 markdown 能改变 agent 怎么说话,
-但改不了它被允许做什么。
+**The line to say: wording belongs to the Skill, decisions do not.**
+"Does the amount match" and "may this be auto-sent" remain deterministic code.
+Editing markdown changes how the agent speaks; it cannot change what it is
+allowed to do.
 
 ---
 
-## 四、语言
+## 4. Language
 
-- **对外(租客、维修师傅)一律英文** —— 租客只看英文
-  - 催缴短信:`rent.py` 的 `build_collection_sms()`,确定性模板
-  - 付款回执 / 索要照片 / 派单简报:instruction 里要求模型用英文
-- **对内(给房东的日报、待办、汇总)保持中文**
+- **Everything outbound (tenants, contractors) is English** — tenants read English only
+  - Collection texts: `build_collection_sms()` in `rent.py`, a deterministic template
+  - Payment receipts / photo requests / dispatch briefs: the instruction requires
+    the model to write English
+- Landlord-facing output (daily digest, to-dos, summaries) — see the note in the
+  submission checklist below
 
-回执措辞在英文下同样受约束:只能说
-`"we have received your payment notice for ... rent"`,
-绝不能说 `"payment confirmed"` / `"funds received"`。
-
----
-
-## 五、Google Voice 要不要装 app
-
-**系统不需要。** 整套走 Gmail API,Voice 只负责服务端的「短信 ↔ 邮件」转发。
-
-录 demo 时**拍你自己的手机**比开 voice.google.com 更好 —— 你的号码就是名册里的
-1F-A,发出去的短信会回到你手机上,一个完整往返闭环最有说服力。
+Receipt wording stays constrained in English too. After verification it must
+state what was checked and found ("we've checked our PayPal account and see your
+$1,000 received on August 30"); before verification it may say only
+`"we have received your payment notice"`, never `"payment confirmed"` /
+`"funds received"`, and a settled-in-full conclusion is forbidden either way.
 
 ---
 
-## 六、提交说明必须写清楚
+## 5. Do you need the Google Voice app?
 
-1. **PayPal 验证是 mock**,隔离在 `payment.py` 的 `_lookup_transactions()` 一个函数里
-2. **Google Voice 邮件解析不是官方 API**,格式由 Google 自行决定,所以隔离在
-   `gmail.py` 的解析常量区,改版时只改一处
-3. **催缴短信是自动发送的** —— 这与 `CLAUDE.md` 架构约束 1(绝不自动发送对外消息)
-   相矛盾,是房东明确要求的取舍,需要在提交说明里解释
+**The system doesn't.** Everything runs through the Gmail API; Voice only handles
+the server-side SMS ↔ email forwarding.
 
-## 七、别做
+For the recording, **filming your own phone** beats opening voice.google.com —
+your number is 1F-A in the roster, so the text comes back to your phone and a
+complete round trip is the most convincing thing you can show.
 
-- 别拍 Gmail、`tenants.json`、`.env`
-- 别在最后一刻把 `DRY_RUN` 改成 `false` 试真发 —— 发出去撤不回,而且画面上看不出区别
-- 录制当天别改代码
+---
+
+## 6. What the submission notes must state
+
+1. **PayPal verification is mocked**, isolated in the single function
+   `_lookup_transactions()` in `payment.py`
+2. **The Google Voice email parsing is not an official API** — the format is
+   Google's own, so it is isolated in the parsing constants in `gmail.py` and a
+   format change requires one edit
+3. **Collection texts are sent automatically** — this contradicts architectural
+   constraint 1 in `CLAUDE.md` (never auto-send outbound messages). It is a
+   trade-off the landlord explicitly asked for and needs explaining in the
+   submission notes
+
+## 7. Don't
+
+- Don't film Gmail, `tenants.json`, or `.env`
+- Don't flip `DRY_RUN` to `false` at the last minute to try a real send — it
+  can't be recalled, and it looks identical on screen
+- Don't change code on recording day

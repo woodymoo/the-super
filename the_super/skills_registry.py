@@ -1,14 +1,18 @@
-"""技能注册表 —— 全项目共用一个实例。
+"""Skill registry — one shared instance for the whole project.
 
-对租客说话的措辞规范全部外置在 skills/tenant-sms/。
+Every wording standard for talking to tenants lives outside the code in
+skills/tenant-sms/.
 
-为什么不写进 instruction:措辞规则会不断变厚(每种设备该问哪些部位、
-每种付款异常怎么措辞、什么情况只能给缓冲回复),塞进 instruction 会让
-**每次调用都带上全部内容**。Skill 是按需加载的 —— 模型先看 SKILL.md 的
-目录,判断这次要哪个 reference 再去读。写多细都不撑爆上下文。
+Why not put it in an instruction: wording rules keep growing (which spots to ask
+about per fixture, how to word each payment anomaly, when only a holding reply is
+allowed), and stuffing that into an instruction means **carrying all of it on
+every call**. A Skill loads on demand — the model reads the index in SKILL.md,
+decides which reference this case needs, and reads only that one. The rules can
+be as detailed as you like without blowing up the context.
 
-⚠️ 措辞归 Skill,**判定不归**。"金额相不相符""能不能自动发"这类有后果的
-判断仍然是确定性代码。Skill 管"怎么说",不管"该不该说"。
+⚠️ Wording belongs to the Skill; **decisions do not**. Consequential judgments
+like "does the amount match" and "may this be auto-sent" remain deterministic
+code. The Skill governs how to say it, not whether it may be said.
 """
 
 import pathlib

@@ -1,15 +1,18 @@
-"""Gmail 工具 —— 短信收发和邮件附件全部走这里。
+"""Gmail tooling — all SMS traffic and email attachments go through here.
 
-Google Voice 开启 "Forward messages to email" 后:
-  · 租客短信 → 变成来自 txt.voice.google.com 的邮件
-  · 回复那封邮件 → Voice 以短信形式发回给租客
+With "Forward messages to email" enabled in Google Voice:
+  - A tenant's text -> arrives as an email from txt.voice.google.com
+  - Replying to that email -> Voice delivers it to the tenant as a text
 
-⚠️ 这不是正式 API,Voice 的邮件格式由 Google 自行决定,随时可能变。
-   所有格式相关的常量和逻辑集中在下面"Voice 邮件解析"一节,坏了只改这一处。
-   解析规则依据 fixtures/sample_voice_email.txt(2026-08-31 实测样本)。
+⚠️ This is not an official API. The Voice email format is Google's own and can
+   change at any time. Every format-dependent constant and rule is collected in
+   the "Voice email parsing" section below, so a break requires one edit here.
+   The parsing rules follow fixtures/sample_voice_email.txt (a real sample
+   captured 2026-08-31).
 
-⚠️ 基础设施故障(网络、认证过期、Gmail 5xx)一律让它抛出去 —— ADK 2.0 会重试。
-   这里不写 except Exception(见 CLAUDE.md)。
+⚠️ Infrastructure failures (network, expired credentials, Gmail 5xx) are always
+   allowed to propagate — ADK 2.0 retries them. No except Exception here
+   (see CLAUDE.md).
 """
 
 import base64
@@ -23,42 +26,46 @@ from googleapiclient.discovery import build
 
 from ..schemas import IncomingMessage
 from .store import remember_thread
-from ..tenants import identify_tenant, normalize_phone  # noqa: F401  (渠道层沿用此名)
+from ..tenants import identify_tenant, normalize_phone  # noqa: F401  (the channel layer keeps this name)
 
 VOICE_SENDER_DOMAIN = "txt.voice.google.com"
 
-# 处理过的 message id,避免重复处理。删掉这个文件即可重放(录 demo 有用)。
+# Processed message ids, to avoid handling one twice. Delete this file to replay
+# (useful when recording the demo).
 CURSOR_FILE = Path(os.environ.get(
     "GMAIL_HISTORY_FILE",
     Path(__file__).parent.parent / "fixtures" / "history_cursor.json"))
 
-# DRY_RUN=true 时一切写操作只打日志不真执行。第一次对真实邮箱跑务必开着。
+# With DRY_RUN=true every write only logs instead of executing. Keep it on for the
+# first run against a real mailbox.
 DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() in ("1", "true", "yes")
 
 
 def _service():
-    """Gmail API client。凭据复用 authorize.py 里那套。"""
+    """Gmail API client. Reuses the credentials set up by authorize.py."""
     from authorize import get_credentials
     return build("gmail", "v1", credentials=get_credentials())
 
 
-# ---------------------------------------------------------------- Voice 邮件解析
-# 以下 4 个常量就是"Google 改版时只改这一处"的那一处。
+# ------------------------------------------------------------ Voice email parsing
+# These 4 constants are the "one place to edit when Google changes the format".
 
-# Subject 实测形如: "New text message from (917) 555-0101"
+# The subject looks like: "New text message from (917) 555-0101"
 VOICE_SUBJECT_RE = re.compile(r"new text message from\s+(.+?)\s*$", re.I)
 
-# text/plain 正文里,短信原文夹在这两行样板之间
+# In the text/plain body, the tenant's message sits between these two boilerplate lines
 VOICE_BODY_START = "<https://voice.google.com>"
 VOICE_BODY_END = "To respond to this text message"
 
 
 def parse_voice_email(raw_message: dict) -> tuple[str, str]:
-    """从 Voice 转发邮件中抽出 (发件号码, 短信正文)。
+    """Extract (sender number, message body) from a forwarded Voice email.
 
-    号码返回**规范化后的 10 位**(9175550101),调用方不必再处理格式。
-    解析不出来返回空字符串,由调用方决定跳过还是转人工 —— 不抛异常,
-    因为格式变化是业务语义问题不是基础设施故障。
+    The number is returned **normalized to 10 digits** (9175550101), so callers
+    don't have to handle formatting. When parsing fails it returns an empty
+    string and the caller decides whether to skip or escalate — it does not
+    raise, because a format change is a business/semantic problem rather than an
+    infrastructure failure.
     """
     headers = {h["name"].lower(): h["value"]
                for h in raw_message.get("payload", {}).get("headers", [])}
@@ -68,7 +75,7 @@ def parse_voice_email(raw_message: dict) -> tuple[str, str]:
     if m:
         sender = normalize_phone(m.group(1))
     if not sender:
-        # 兜底:From 的显示名也是号码 —— "(917) 555-0101" <...@txt.voice.google.com>
+        # Fallback: the From display name is also the number — "(917) 555-0101" <...@txt.voice.google.com>
         dm = re.match(r'"([^"]+)"', headers.get("from", ""))
         if dm:
             sender = normalize_phone(dm.group(1))
@@ -77,14 +84,14 @@ def parse_voice_email(raw_message: dict) -> tuple[str, str]:
 
 
 def _strip_voice_boilerplate(plain: str) -> str:
-    """剥掉 Voice 加的页脚,只留租客真正发的那几行。
+    """Strip the footer Voice adds, leaving only what the tenant actually sent.
 
-    实测结构:
-        1 (空行)
+    The observed structure:
+        1 (blank line)
         2 <https://voice.google.com>
-        3 ← 短信原文(可能多行)
+        3 <- the tenant's message (may span several lines)
         4 To respond to this text message, reply to this email or ...
-        5+ 一堆链接和 Google 地址
+        5+ a pile of links and Google's address
     """
     lines = plain.splitlines()
     start = end = None
@@ -96,12 +103,12 @@ def _strip_voice_boilerplate(plain: str) -> str:
             end = i
             break
     if start is None:
-        return plain.strip()          # 格式变了 —— 退化成整段,总比丢消息好
+        return plain.strip()          # the format changed — fall back to the whole body, better than losing the message
     return "\n".join(lines[start:end]).strip()
 
 
 def _extract_plain_text(raw_message: dict) -> str:
-    """从 Gmail message payload 里取 text/plain 正文。"""
+    """Pull the text/plain body out of a Gmail message payload."""
     def walk(part):
         if part.get("mimeType") == "text/plain":
             data = part.get("body", {}).get("data", "")
@@ -115,7 +122,7 @@ def _extract_plain_text(raw_message: dict) -> str:
     return (walk(raw_message.get("payload", {})) or "").strip()
 
 
-# ---------------------------------------------------------------- 游标
+# ---------------------------------------------------------------- Cursor
 
 def _load_seen() -> set[str]:
     if not CURSOR_FILE.exists():
@@ -127,16 +134,17 @@ def _save_seen(seen: set[str]) -> None:
     CURSOR_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = CURSOR_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps({"seen": sorted(seen)[-500:]}, indent=2))
-    tmp.replace(CURSOR_FILE)          # 原子替换,写一半崩掉不会毁游标
+    tmp.replace(CURSOR_FILE)          # atomic replace, so a crash mid-write can't corrupt the cursor
 
 
-# ---------------------------------------------------------------- 对外接口
+# ---------------------------------------------------------------- Public API
 
 def read_new_messages(max_results: int = 20) -> list[IncomingMessage]:
-    """拉未处理的新消息,区分 Voice 短信和租客直发邮件。
+    """Fetch unprocessed new messages, separating Voice texts from tenant email.
 
-    游标用"处理过的 message id 集合"而不是 historyId —— historyId 首次运行
-    没有基准,且一旦跳号就静默丢消息。id 集合可以重放(删 cursor 文件即可)。
+    The cursor is a set of processed message ids rather than a historyId —
+    historyId has no baseline on the first run, and once it skips it drops
+    messages silently. A set of ids can be replayed (just delete the cursor file).
     """
     svc = _service()
     seen = _load_seen()
@@ -165,7 +173,7 @@ def read_new_messages(max_results: int = 20) -> list[IncomingMessage]:
 
         tenant = identify_tenant(sender) if sender else None
         if tenant is None:
-            seen.add(mid)             # 认不出的直接记下,不反复重试
+            seen.add(mid)             # record unrecognized senders so we don't retry them endlessly
             continue
 
         out.append(IncomingMessage(
@@ -180,7 +188,7 @@ def read_new_messages(max_results: int = 20) -> list[IncomingMessage]:
             has_attachments=any(
                 p.get("filename") for p in msg.get("payload", {}).get("parts", []) or []),
         ))
-        # 存下线程 —— 催缴/回执要靠它才能发得出去
+        # Remember the thread — collection texts and receipts can only go out through it
         remember_thread(tenant["room_id"], msg["threadId"])
         seen.add(mid)
 
@@ -189,7 +197,7 @@ def read_new_messages(max_results: int = 20) -> list[IncomingMessage]:
 
 
 def _raw_reply(thread_id: str, text: str) -> dict:
-    """构造一封回复到指定 thread 的邮件。"""
+    """Build a reply email addressed to the given thread."""
     svc = _service()
     thread = svc.users().threads().get(
         userId="me", id=thread_id, format="metadata").execute()
@@ -207,9 +215,9 @@ def _raw_reply(thread_id: str, text: str) -> dict:
 
 
 def draft_sms_reply(gmail_thread_id: str, text: str) -> str:
-    """建草稿。**不发送。** 房东在 Gmail 里点发送,Voice 转成短信发给租客。"""
+    """Create a draft. **Does not send.** The landlord hits send in Gmail and Voice delivers it as a text."""
     if DRY_RUN:
-        print(f"[DRY_RUN] 本应建草稿 -> thread={gmail_thread_id}\n{text}\n")
+        print(f"[DRY_RUN] would create draft -> thread={gmail_thread_id}\n{text}\n")
         return "dry-run-draft"
     body = _raw_reply(gmail_thread_id, text)
     draft = _service().users().drafts().create(
@@ -218,9 +226,9 @@ def draft_sms_reply(gmail_thread_id: str, text: str) -> str:
 
 
 def send_sms_now(gmail_thread_id: str, text: str) -> str:
-    """立即发送。见 CLAUDE.md 架构约束 1 —— 只用于允许自动发的场景。"""
+    """Send immediately. See CLAUDE.md constraint 1 — only for the cases where auto-send is allowed."""
     if DRY_RUN:
-        print(f"[DRY_RUN] 本应发送 -> thread={gmail_thread_id}\n{text}\n")
+        print(f"[DRY_RUN] would send -> thread={gmail_thread_id}\n{text}\n")
         return "dry-run-sent"
     sent = _service().users().messages().send(
         userId="me", body=_raw_reply(gmail_thread_id, text)).execute()
@@ -228,9 +236,10 @@ def send_sms_now(gmail_thread_id: str, text: str) -> str:
 
 
 def fetch_attachments(gmail_message_id: str) -> list[dict]:
-    """取附件,返回 [{filename, mime_type, data(bytes)}, ...]。
+    """Fetch attachments, returning [{filename, mime_type, data(bytes)}, ...].
 
-    图片直接交给 Gemini 做视觉判断,所以返回原始字节而非落盘。
+    Images go straight to Gemini for visual assessment, so this returns raw bytes
+    rather than writing to disk.
     """
     svc = _service()
     msg = svc.users().messages().get(

@@ -1,16 +1,20 @@
-"""房租周期催缴 —— 全部确定性代码,不调模型。
+"""Rent-cycle collection — entirely deterministic code, with no model call.
 
-CLAUDE.md 约束 2:有财务或法律后果的判断必须写成确定性代码。
-催缴短信的**触发条件和文案都是法律敏感的**,所以连措辞都是模板,
-不交给模型生成 —— 模型每次换词,而这类文本将来可能要作为证据。
+CLAUDE.md constraint 2: judgments with financial or legal consequences must be
+written as deterministic code. For a collection text **both the trigger condition
+and the copy are legally sensitive**, so even the wording is a template rather
+than model output — a model rewords it every time, and this kind of text may
+later serve as evidence.
 
-时间线(每个租客按自己合同的应付日,不是全局统一):
-    应付日当天        —— 不算逾期
-    应付日 + 1 天     —— 仍未收到全额 → 起草催缴短信,给 5 天补缴期
-    补缴期满(逾期 6 天)—— 此时逾期已满 5 天,房东才有资格走 14 天通知程序
+Timeline (each tenant follows their own lease's due day, not one global date):
+    On the due date        — not late
+    Due date + 1 day       — still not paid in full -> draft the collection text with a 5-day cure period
+    End of the cure period — the rent is now 5 full days overdue, and only then does the landlord qualify for the 14-day notice process
 
-⚠️ 这里只**起草**。不自动发给租客(架构约束 1),也不生成任何法律通知 ——
-   14 天通知涉及法定送达形式,短信通常不构成有效送达,必须走线下。
+⚠️ This module only **drafts**. Sending to the tenant is handled by the caller,
+   and no legal notice is generated here — a 14-day notice has statutory service
+   requirements, an SMS generally does not constitute valid service, and that
+   step must happen offline.
 """
 
 from datetime import date, timedelta
@@ -21,39 +25,40 @@ from pydantic import BaseModel
 from .payment import _lookup_transactions
 from .tenants import days_overdue, load_tenants, rent_due_date
 
-# 应付日次日开始催缴
+# Collection starts the day after the due date
 COLLECTION_TRIGGER_DAYS = 1
 
-# 催缴短信给的补缴期。5 天是有来由的:逾期满 5 天之后房东才可以
-# 启动 14 天通知程序,所以补缴期设成 5 天既给了租客机会,
-# 也让时间线自然衔接到下一步。
+# The cure period the collection text grants. The 5 is not arbitrary: the
+# landlord may start the 14-day notice process only after the rent is 5 full days
+# overdue, so a 5-day cure period both gives the tenant a real chance and lines
+# the timeline up with the next step.
 CURE_PERIOD_DAYS = 5
 
 
 class RentStatus(BaseModel):
-    """某租客某月的房租状态。纯事实,不含动作。"""
+    """One tenant's rent status for one month. Facts only, no actions."""
     room_id: str
     tenant_name: str
     tenant_email: str
     month: str
-    due_date: str                       # ISO 日期
+    due_date: str                       # ISO date
     days_overdue: int
     expected_amount: float
     found_amount: float
     status: Literal["not_yet_due", "paid_full", "underpaid", "nothing_received"]
     needs_collection: bool
-    # ⚠️ 不催缴时正是 None,必须给默认值
-    cure_deadline: str | None = None    # 补缴截止日
+    # ⚠️ This is exactly None when no collection is due, so it must have a default
+    cure_deadline: str | None = None    # cure deadline
 
 
 def check_one(tenant: dict, month: str, today: date) -> RentStatus:
-    """单个租客的房租状态。纯函数,可单测。"""
+    """One tenant's rent status. A pure function, so it is unit-testable."""
     due = rent_due_date(tenant, month)
     overdue = days_overdue(tenant, month, today)
     expected = float(tenant["rent_amount"])
 
-    # 金额来源是租客自己的 rent_amount,不是全局常量 ——
-    # 不同租客合同金额可以不同。
+    # The amount comes from that tenant's own rent_amount, not a global constant —
+    # different leases may carry different amounts.
     txns = _lookup_transactions(tenant["email"], month)
     found = round(sum(t["amount"] for t in txns), 2)
 
@@ -84,19 +89,21 @@ def check_one(tenant: dict, month: str, today: date) -> RentStatus:
 
 
 def check_rent(month: str, today: date) -> list[RentStatus]:
-    """全部租客的房租状态,按逾期天数倒序。"""
+    """Rent status for every tenant, most overdue first."""
     rows = [check_one(t, month, today) for t in load_tenants()]
     return sorted(rows, key=lambda r: -r.days_overdue)
 
 
 def build_collection_sms(s: RentStatus) -> str:
-    """催缴短信正文 —— 确定性模板。
+    """The body of the collection text — a deterministic template.
 
-    刻意做到的几点:
-    · 不含任何法律威胁措辞。这条短信的作用是提醒和留痕,不是通知。
-    · 明确留出"你可能已经付了"的余地 —— PayPal eCheck 最长 3 个工作日
-      才到账,租客确实可能已付而我们还没看到。
-    · 少付的情况报出差额,不含糊。
+    Deliberate choices:
+    - No legal threat language of any kind. This text exists to remind and to
+      leave a record, not to serve notice.
+    - Explicit room for "you may already have paid" — a PayPal eCheck takes up to
+      3 business days to clear, so the tenant may genuinely have paid before we
+      can see it.
+    - For an underpayment, state the shortfall plainly.
     """
     if s.status == "underpaid":
         detail = (f"We received ${s.found_amount:.2f}, which is "

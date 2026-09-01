@@ -1,12 +1,13 @@
-"""后台入口 —— 由 Cloud Scheduler 触发,不是给人聊天用的。
+"""Background entry point — triggered by Cloud Scheduler, not for chatting with.
 
-adk web / adk run 会自己建 Runner 和 SessionService,那是调试用的。
-生产环境没有"正在打字的人",触发者是定时任务,所以要自己建。
+adk web / adk run build their own Runner and SessionService, but those are for
+debugging. In production there is no "person typing"; the trigger is a scheduled
+job, so we build them ourselves.
 
-三个触发器:
-  · /poll    每 5–15 分钟  —— 拉新消息,分类,走对应分支
-  · /rent    每月 1/2/5 号 —— 房租周期检查
-  · /digest  每天傍晚      —— 日报发短信给房东
+Three triggers:
+  - /poll    every 5-15 min  — fetch new messages, classify, take the right branch
+  - /rent    on the 1st/2nd/5th — the rent-cycle check
+  - /digest  each evening     — text the daily digest to the landlord
 """
 
 import asyncio
@@ -17,10 +18,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# ⚠️ 必须在导入 google.adk 和 the_super.* 之前加载。
-# ADK 只在 CLI 路径(adk web / adk run)里自己加载 .env,
-# `python main.py poll` 走不到那里 —— 不显式加载的话 GOOGLE_API_KEY
-# 和 LANDLORD_SMS_THREAD 全是空的,Cloud Scheduler 的每次触发都是裸奔。
+# ⚠️ This must run before importing google.adk and the_super.*.
+# ADK loads .env itself only on the CLI path (adk web / adk run), and
+# `python main.py poll` never gets there — without loading it explicitly,
+# GOOGLE_API_KEY and LANDLORD_SMS_THREAD are both empty and every Cloud Scheduler
+# trigger runs blind.
 load_dotenv(Path(__file__).parent / "the_super" / ".env")
 
 from google.adk.runners import Runner  # noqa: E402
@@ -40,9 +42,10 @@ from the_super.tools.store import (  # noqa: E402
 APP_NAME = "the_super"
 LANDLORD_THREAD = os.environ.get("LANDLORD_SMS_THREAD", "")
 
-# ⚠️ InMemorySessionService 仅供本地开发。
-# Cloud Run 容器随时被回收,上云前必须换成 Firestore 或数据库后端,
-# 否则每次重启 agent 都会失忆。
+# ⚠️ InMemorySessionService is for local development only.
+# A Cloud Run container can be reclaimed at any time, so this must become a
+# Firestore or database backend before deploying — otherwise the agent loses its
+# memory on every restart.
 session_service = InMemorySessionService()
 
 runner = Runner(
@@ -53,15 +56,15 @@ runner = Runner(
 
 
 async def process_one(message) -> None:
-    """处理一条消息。
+    """Process one message.
 
-    session 三层结构:app / user / session。
-    room_id 当 user_id(区分房间),**message_id** 当 session_id。
+    Sessions have three levels: app / user / session.
+    room_id serves as user_id (separating rooms) and **message_id** as session_id.
 
-    ⚠️ 不能用 gmail_thread_id 当 session_id ——
-    Google Voice 把与同一个号码的整段会话归到**一个** Gmail thread,
-    所以租客发第二条短信时 thread_id 是重复的,create_session 会抛
-    AlreadyExistsError。message_id 才是每条消息唯一的。
+    ⚠️ gmail_thread_id cannot be the session_id — Google Voice groups the entire
+    conversation with one number into a **single** Gmail thread, so the second
+    text from a tenant carries a duplicate thread_id and create_session raises
+    AlreadyExistsError. message_id is what is unique per message.
     """
     user_id = message.room_id or "unknown"
     session_id = message.gmail_message_id
@@ -83,7 +86,7 @@ async def process_one(message) -> None:
 
 
 def _print_event(message, event) -> None:
-    """只打印文本,不打印 thought_signature 那堆二进制。"""
+    """Print text only, not the thought_signature binary blob."""
     parts = getattr(event.content, "parts", None) or []
     for part in parts:
         text = (getattr(part, "text", None) or "").strip()
@@ -92,19 +95,21 @@ def _print_event(message, event) -> None:
 
 
 async def poll() -> None:
-    """拉新消息并逐条处理。
+    """Fetch new messages and process them one at a time.
 
-    ⚠️ 这里的 try/except 是**有意为之**,而且是全项目唯一一处。
+    ⚠️ The try/except here is **deliberate**, and it is the only one in the project.
 
-    CLAUDE.md 说工具里不要写宽泛 except(会屏蔽 ADK 的框架级重试)。
-    但这里不是工具内部,是驱动循环的**逐条业务边界**:一条消息处理失败
-    不该让同一批的其他消息全部丢掉。ADK 的节点级重试在 process_one
-    内部已经跑完了,走到这里说明那条消息确实处理不了。
+    CLAUDE.md says not to write broad excepts in tools (they hide ADK's
+    framework-level retry). But this is not inside a tool; it is the driving
+    loop's **per-message business boundary**: one message failing should not throw
+    away the rest of the batch. ADK's node-level retries have already run inside
+    process_one, so reaching here means that message genuinely cannot be handled.
 
-    绝不 catch BaseException —— 那会吞掉 NodeInterruptedError,破坏人工介入暂停。
+    Never catch BaseException — that swallows NodeInterruptedError and breaks
+    human-in-the-loop pauses.
     """
     messages = read_new_messages()
-    print(f"{len(messages)} 条新消息\n")
+    print(f"{len(messages)} new message(s)\n")
 
     ok = failed = 0
     for m in messages:
@@ -113,32 +118,35 @@ async def poll() -> None:
             ok += 1
         except Exception:
             failed += 1
-            print(f"  ❌ [{m.room_id}] 处理失败,跳过这条继续:")
+            print(f"  ❌ [{m.room_id}] failed; skipping this one and continuing:")
             traceback.print_exc()
         print()
 
-    print(f"完成:成功 {ok} 条,失败 {failed} 条")
+    print(f"Done: {ok} succeeded, {failed} failed")
 
 
 async def digest() -> None:
-    """日报 —— 发短信给房东本人,因为他不常查邮件。"""
+    """Daily digest — texted to the landlord themselves, because they rarely check email."""
     overdue = get_overdue_media_tickets()
-    lines = [f"📋 {datetime.now(timezone.utc):%m-%d} 日报"]
+    lines = [f"📋 {datetime.now(timezone.utc):%m-%d} digest"]
 
     if overdue:
-        lines.append(f"\n⏳ {len(overdue)} 张工单等照片已超时:")
+        lines.append(f"\n⏳ {len(overdue)} ticket(s) overdue waiting on photos:")
         lines += [f"· {t['room_id']} ({t['ticket_id']})" for t in overdue]
     else:
-        lines.append("\n无超时待办。")
+        lines.append("\nNothing overdue.")
 
     send_sms_now(LANDLORD_THREAD, "\n".join(lines))
 
 
 async def rent_cycle() -> None:
-    """房租周期 —— 每个租客按自己合同的应付日,逾期次日起草催缴。
+    """Rent cycle — each tenant on their own lease due day; collection the day after.
 
-    ⚠️ 只起草,不自动发给租客(架构约束 1)。给房东本人的汇总可以直接发。
-    判定和文案都在 the_super/rent.py 里,是确定性代码,不经过模型。
+    ⚠️ Collection texts are **sent to tenants automatically** — the landlord
+    explicitly required this on 2026-08-31, overriding architectural constraint 1.
+    Summaries to the landlord themselves are likewise sent directly. Both the
+    decision and the copy live in the_super/rent.py as deterministic code that
+    never passes through the model.
     """
     today = datetime.now(timezone.utc).date()
     month = f"{today:%Y-%m}"
@@ -157,12 +165,20 @@ async def rent_cycle() -> None:
         sms = build_collection_sms(s)
         thread = get_thread(s.room_id)
         if thread:
-            # ⚠️ 自动发给租客 —— 这是房东明确要求的,覆盖了 CLAUDE.md 约束 1。
-            # DRY_RUN=true 时只打日志。改这行之前先想清楚:发出去撤不回。
+            # ⚠️ Sent to the tenant automatically — explicitly required by the
+            # landlord, overriding CLAUDE.md constraint 1. With DRY_RUN=true it
+            # only logs. Think before changing this line: a sent text can't be recalled.
+            #
+            # TODO(quiet hours): commercial SMS practice is not to send late at
+            # night or early in the morning. That is a decision, so it belongs to
+            # code rather than the skill. Right now it relies on the Cloud
+            # Scheduler cron time, and running `python main.py rent` by hand
+            # bypasses it. For a hard guarantee, check the local time in the
+            # property's timezone here and fall back to a draft outside the window.
             sent_id = send_sms_now(thread, sms)
             status = "rent_collection_sent"
         else:
-            # 从没收到过这个租客的短信 -> 没有可回复的线程,只能转人工
+            # Never received a text from this tenant -> no thread to reply to, so escalate
             sent_id, status = None, "rent_collection_no_thread"
         write_ticket(
             status=status,
@@ -175,26 +191,28 @@ async def rent_cycle() -> None:
 
     pending = [s for s in rows if s.needs_collection]
     if not pending:
-        send_sms_now(LANDLORD_THREAD, f"✅ {month} 房租已全部收齐。")
+        send_sms_now(LANDLORD_THREAD, f"✅ {month} rent is fully collected.")
         return
 
-    lines = [f"💰 {month} 房租 —— {len(pending)} 户需处理", ""]
+    lines = [f"💰 {month} rent — {len(pending)} unit(s) need attention", ""]
     for s in pending:
         gap = s.expected_amount - s.found_amount
-        # 区分"已发出"和"发不出去" —— 汇总必须如实反映,
-        # 否则房东以为都通知到了,实际有人从没收到。
-        mark = "已发催缴" if get_thread(s.room_id) else "⚠️ 无短信线程,未发出"
+        # Distinguish "sent" from "couldn't send" — the summary has to reflect
+        # reality, or the landlord assumes everyone was notified when someone
+        # never received anything.
+        mark = "collection sent" if get_thread(s.room_id) else "⚠️ no SMS thread, not sent"
         lines.append(
-            f"· {s.room_id} {s.tenant_name}:应付 {s.due_date},"
-            f"逾期 {s.days_overdue} 天,差 ${gap:.2f} —— {mark}"
+            f"- {s.room_id} {s.tenant_name}: due {s.due_date}, "
+            f"{s.days_overdue} day(s) overdue, ${gap:.2f} short — {mark}"
         )
     blocked = [s for s in pending if not get_thread(s.room_id)]
     lines.append("")
-    lines.append(f"已自动发出 {len(pending) - len(blocked)} 条。")
+    lines.append(f"{len(pending) - len(blocked)} sent automatically.")
     if blocked:
         lines.append(
-            f"{len(blocked)} 户无法发送:Voice 只能回复已有线程,"
-            f"这些租客从没给你的 Voice 号发过短信,需要你手动联系。"
+            f"{len(blocked)} could not be sent: Voice can only reply to an existing "
+            f"thread, and these tenants have never texted your Voice number. "
+            f"You'll need to contact them manually."
         )
     send_sms_now(LANDLORD_THREAD, "\n".join(lines))
 

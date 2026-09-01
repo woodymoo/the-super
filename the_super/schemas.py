@@ -1,6 +1,7 @@
-"""节点之间传递数据的类型契约。
+"""Type contracts for data passed between nodes.
 
-ADK 2.0 的图引擎靠节点返回值传数据,这些 pydantic 模型就是接口定义。
+The ADK 2.0 graph engine passes data via node return values, and these pydantic
+models are the interface definition.
 """
 
 from typing import Literal
@@ -9,14 +10,15 @@ from pydantic import BaseModel
 
 
 class IncomingMessage(BaseModel):
-    """一条进来的消息,已经过渠道解析和租客识别。"""
-    source: Literal["sms", "email"]      # sms = 经 Voice 转发,email = 租客直发
+    """One incoming message, already channel-parsed and resolved to a tenant."""
+    source: Literal["sms", "email"]      # sms = forwarded via Voice, email = sent by the tenant directly
     gmail_thread_id: str
     gmail_message_id: str
-    sender: str                          # 短信号码 或 邮箱地址
-    # ⚠️ Optional 字段必须给默认值。ADK 序列化节点输出时会剥掉 None,
-    # 再校验就报 'Field required' —— `X | None` 不带默认在 pydantic 里仍是必填。
-    room_id: str | None = None           # 匹配不到租客时为 None
+    sender: str                          # phone number or email address
+    # ⚠️ Optional fields must have defaults. ADK strips None when serializing a
+    # node output, and re-validation then fails with 'Field required' — in pydantic
+    # `X | None` without a default is still required.
+    room_id: str | None = None           # None when no tenant matches
     tenant_email: str | None = None
     body: str
     received_at: str                     # ISO 8601
@@ -24,21 +26,23 @@ class IncomingMessage(BaseModel):
 
 
 class Classification(BaseModel):
-    """分类结果。"""
+    """The classification result."""
     intent: Literal["PAYMENT", "MAINTENANCE", "OTHER"]
     confidence: Literal["high", "low"]
     reason: str
 
 
 class RoutedMessage(BaseModel):
-    """分类结果 + 原始消息。
+    """The classification result plus the original message.
 
-    分类节点的输出只有 intent/confidence/reason,不含租客原话 ——
-    下游的付款抽取和维修定级都需要原文。ADK 2.0 靠返回值传数据,
-    所以要把两者合起来往下传。
+    The classifier node outputs only intent/confidence/reason and not the
+    tenant's own words — but the downstream payment extraction and maintenance
+    triage both need the original text. ADK 2.0 passes data by return value, so
+    the two have to travel onward together.
 
-    ⚠️ 这个对象由 intent_router 用代码组装(原文从 ctx.user_content 取回),
-       不是让模型复述一遍 —— 模型复述会悄悄改掉 room_id 这类关键字段。
+    ⚠️ This object is assembled in code by intent_router (the original text is
+       recovered from ctx.user_content) rather than having the model restate it —
+       a model restating it quietly alters key fields like room_id.
     """
     message: IncomingMessage
     classification: Classification

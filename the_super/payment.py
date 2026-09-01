@@ -1,8 +1,9 @@
 """
-The Super — 付款验证分支 (ADK 2.0 graph workflow)
+The Super — payment verification branch (ADK 2.0 graph workflow)
 
-mock PayPal 工具 + 图接线。
-真实 PayPal Transaction Search API 上线时,只需替换 _lookup_transactions() 一个函数。
+Mock PayPal tooling plus the graph wiring.
+When the real PayPal Transaction Search API goes live, only the single function
+_lookup_transactions() needs replacing.
 """
 
 import json
@@ -21,100 +22,107 @@ from .tools.store import get_ledger, write_ledger
 from .tenants import get_tenant, rent_due_date
 
 FIXTURES = Path(__file__).parent / "fixtures" / "paypal_transactions.json"
-USE_MOCK = True  # 上线时改 False
+USE_MOCK = True  # set to False when going live
 
 
-# ---------------------------------------------------------------- 数据契约
-# 这三个 schema 就是节点之间传递数据的类型契约。
-# ADK 2.0 会把每个节点的返回值自动传给下一个节点,不需要写 session state。
+# ------------------------------------------------------------ Data contracts
+# These three schemas are the type contract for data passed between nodes.
+# ADK 2.0 forwards each node's return value to the next one automatically;
+# there is no session state to write.
 
 class PaymentClaim(BaseModel):
-    """租客短信里声称的付款。"""
+    """A payment as claimed in the tenant's text."""
     room_id: str
     tenant_email: str
     claimed_amount: float
     claimed_method: str          # "paypal" / "zelle" / ...
     month: str                   # "2026-09"
-    month_stated: bool           # 租客是否**明确说了**是哪个月的房租
+    month_stated: bool           # did the tenant **explicitly say** which month
 
 
 class RecentTxn(BaseModel):
-    """最近查到的一笔入账。用来验证租客"我刚转了"这个具体声称。"""
+    """A recently found deposit. Used to verify the specific claim "I just sent"."""
     txn_id: str
     amount: float
     date: str                             # ISO
     days_ago: int
-    month_bucket: str                     # 这笔钱落在账本的哪个月
+    month_bucket: str                     # which ledger month this payment falls in
 
 
 class MonthStatus(BaseModel):
-    """某个月的完整实况。所有字段都是代码查出来的事实,不是推断。"""
+    """The full picture for one month. Every field is a fact looked up by code, not an inference."""
     month: str
     expected: float
-    # claimed(租客声称) / confirmed(房东确认) / disputed / missing / None(无记录)
-    # ⚠️ claimed != confirmed。写短信时绝不能把 claimed 说成"我们收到了你的房租"。
+    # claimed (tenant asserts) / confirmed (landlord confirms) / disputed / missing / None (no record)
+    # ⚠️ claimed != confirmed. When writing the text, never render claimed as "we received your rent".
     ledger_status: str | None = None
-    paypal_found: float = 0.0             # PayPal 查到的该月合计
-    settled: bool = False                 # 账本金额已达应付 -> 这个月不用再问
+    paypal_found: float = 0.0             # total found in PayPal for that month
+    settled: bool = False                 # the ledger total reaches the amount due -> no need to ask about this month
 
 
 class PaymentContext(BaseModel):
-    """问"这是哪个月的房租"时,模型需要知道的事实。
+    """The facts the model needs in order to ask "which month is this rent for".
 
-    全部由代码查出来。模型只负责把这些事实组织成一句精确的问话 ——
-    不负责查、不负责判断、也不许编造这里没有的事实。
+    All of it is looked up by code. The model only organizes these facts into one
+    precise question — it does not look anything up, does not judge, and may not
+    invent facts that aren't here.
     """
     room_id: str
     tenant_name: str
-    claimed_amount: float                 # 租客说他转了多少
-    expected_amount: float                # 该租客的月租
-    amount_matches_rent: bool             # 声称金额是否正好等于一个月租金
-    guessed_month: str                    # 抽取节点的最佳猜测
+    claimed_amount: float                 # how much the tenant says they sent
+    expected_amount: float                # that tenant's monthly rent
+    amount_matches_rent: bool             # whether the claimed amount equals exactly one month's rent
+    guessed_month: str                    # the extraction node's best guess
 
-    # —— 验证租客的**具体声称**:"我刚转了 X" 意味着最近有一笔 X 进账。
-    # 不验证这一条,就等于接受了租客的说法。虚报付款正是从这里钻空子。
-    recent_matches: list[RecentTxn] = []   # 近期金额吻合的入账
-    has_recent_match: bool = False         # 找到了吗
+    # —— Verify the tenant's **specific claim**: "I just sent X" implies a deposit
+    # of X arrived recently. Skipping this check means accepting their account by
+    # default, and that is exactly the gap a false payment claim exploits.
+    recent_matches: list[RecentTxn] = []   # recent deposits with a matching amount
+    has_recent_match: bool = False         # was one found
     recent_window_days: int = 5
 
-    months: list[MonthStatus] = []        # 最近几个月的实况(升序)
-    unsettled_months: list[str] = []      # 尚未结清的月份(升序) —— 内部信息
+    months: list[MonthStatus] = []        # the picture for recent months (ascending)
+    unsettled_months: list[str] = []      # months not yet settled (ascending) — internal information
 
-    # —— 这笔钱该记到哪个月:确定性规则算出来的,不交给模型判断。
-    # 款项归属会影响逾期天数和能不能走法定程序,是有后果的判断(CLAUDE.md 约束 2)。
-    suggested_month: str | None = None    # 建议归属月份
-    suggested_reason: str = ""            # 为什么 —— 写进短信让租客能核对
-    suggestion_is_certain: bool = False   # 只有一个可能 -> 陈述;多个 -> 让租客选
-    # 最近一个已结清的月份;据此往后推一个月是常见但**不可靠**的猜测
+    # —— Which month this payment books to: computed by a deterministic rule, not
+    # left to the model. Allocation affects days-overdue counts and whether the
+    # statutory track applies, so it is a consequential judgment (CLAUDE.md constraint 2).
+    suggested_month: str | None = None    # the month it should apply to
+    suggested_reason: str = ""            # why — goes into the text so the tenant can check it
+    suggestion_is_certain: bool = False   # only one possibility -> state it; several -> let the tenant choose
+    # The most recent settled month; stepping one month past it is a common but **unreliable** guess
     last_settled_month: str | None = None
 
 
 class PaymentVerification(BaseModel):
-    """比对账本之后的结论。"""
+    """The conclusion after comparing against the ledger."""
     room_id: str
     month: str
     month_stated: bool
     claimed_amount: float
     expected_amount: float
-    # ⚠️ 查无记录时这两个正是 None,不给默认值会让 not_found 分支必崩
+    # ⚠️ These are exactly the fields that are None when nothing is found; without
+    # defaults the not_found branch is guaranteed to crash
     found_amount: float | None = None
+    found_date: str | None = None    # date of the first deposit (ISO), quoted in the receipt
     txn_id: str | None = None
     status: Literal["verified", "amount_mismatch", "not_found", "overpaid"]
     note: str
 
 
-# ---------------------------------------------------------------- Mock 层
-# 唯一的假货就在这个函数里。签名刻意做成和真实 API 一样,
-# 将来换成 requests.get(PAYPAL_TRANSACTION_SEARCH_URL, ...) 即可。
+# ---------------------------------------------------------------- Mock layer
+# The only fake thing lives in this function. The signature is deliberately
+# shaped like the real API, so it can later become
+# requests.get(PAYPAL_TRANSACTION_SEARCH_URL, ...).
 
 def _lookup_transactions(payer_email: str, month: str) -> list[dict]:
-    """查询指定付款人在指定月份的入账记录。
+    """Look up deposits from a given payer in a given month.
 
-    Mock 版本读 fixtures/paypal_transactions.json。
-    真实版本调用 PayPal Transaction Search API v1。
+    The mock version reads fixtures/paypal_transactions.json.
+    The real version calls the PayPal Transaction Search API v1.
     """
     if not USE_MOCK:
-        raise NotImplementedError("接真实 PayPal API 时实现这里")
+        raise NotImplementedError("implement this when wiring up the real PayPal API")
 
     with open(FIXTURES) as f:
         ledger = json.load(f)
@@ -126,10 +134,11 @@ def _lookup_transactions(payer_email: str, month: str) -> list[dict]:
 
 
 def month_router(node_input: PaymentClaim):
-    """租客说清楚是哪个月了吗?
+    """Did the tenant say clearly which month this is for?
 
-    没说清就不能进验证流程 —— 我们不知道这笔钱该记到哪个月,
-    验证"9 月房租"和"8 月房租"是两个完全不同的问题。
+    If not, it cannot enter the verification flow — we don't know which month to
+    book it to, and verifying "September rent" and "August rent" are two entirely
+    different questions.
     """
     if node_input.month_stated:
         return Event(route="MONTH_CLEAR", output=node_input)
@@ -137,25 +146,32 @@ def month_router(node_input: PaymentClaim):
 
 
 def gather_payment_context(node_input: PaymentClaim) -> PaymentContext:
-    """把问月份需要的事实查出来。纯代码,不调模型。
+    """Look up the facts needed to ask about the month. Pure code; no model call.
 
-    房租是预付的,月末交的钱通常是下个月的。8/31 交的钱猜成 8 月,
-    整本台账就错位了 —— 台账错月在租务纠纷里是硬伤。
+    Rent is paid in advance, so money sent at the end of a month is usually for
+    the next one. Guessing that money sent on 8/31 is for August throws the whole
+    ledger out of alignment — and a ledger with the wrong month is a serious
+    liability in a tenancy dispute.
 
-    所以与其泛泛地问 "which month?",不如先看台账里已经有什么:
-    "我们这边 8 月已经记上了,这笔是 9 月的吗?" —— 租客回一个字就能确认。
+    So rather than asking a bare "which month?", look at what the ledger already
+    holds. After verification, "we see your $1,000 from August 30; August is
+    already settled, so we'll apply this to September" lets the tenant confirm in
+    one word.
 
-    ⚠️ 这里同时查 PayPal(房东要求:问月份的同时也要查账),
-       结果一并交给房东,但**不**据此自动生成回执。
+    ⚠️ PayPal is checked here as well (the landlord's requirement: check the books
+       at the same time as asking about the month). The result goes to the
+       landlord, but it does **not** auto-generate a receipt.
     """
     tenant = get_tenant(node_input.room_id) or {}
     expected = float(tenant.get("rent_amount", EXPECTED_RENT))
 
-    # 候选窗口不能瞎取。只有两类月份可能是这笔钱的归属:
-    #   · 已经到期但没结清的(租客在补欠款)
-    #   · 下一个月(房租预付,租客提前交)
-    # 再往后的月份根本还没到期,往前超出有据可查的范围也没意义 ——
-    # 把它们算成"未结清"会让 agent 问出荒唐的问题。
+    # The candidate window can't be arbitrary. Only two kinds of month can be
+    # where this money belongs:
+    #   · already due but unsettled (the tenant is clearing arrears)
+    #   · the next month (rent is prepaid, so the tenant is paying early)
+    # Months beyond that aren't due yet, and reaching further back than the
+    # records go is meaningless — counting them as "unsettled" makes the agent
+    # ask absurd questions.
     rows: list[MonthStatus] = []
     for m in _candidate_months(node_input):
         entry = get_ledger(m).get(node_input.room_id) or {}
@@ -166,16 +182,19 @@ def gather_payment_context(node_input: PaymentClaim) -> PaymentContext:
             expected=expected,
             ledger_status=entry.get("status"),
             paypal_found=found,
-            # 只有账本里真的够数才算结清。台账写着 claimed 但 PayPal 查不到,
-            # 不算结清 —— 那正是"租客说付了但钱没到"的情况。
+            # A month counts as settled only when the books really cover it. A
+            # ledger entry saying claimed with nothing found in PayPal is not
+            # settled — that is precisely the "tenant says they paid but the
+            # money never arrived" case.
             settled=found >= expected,
         ))
 
     recent = find_recent_payments(
         node_input.tenant_email, node_input.claimed_amount, node_input.month)
 
-    # 算归属时要**扣掉这笔刚到的钱** —— 否则它会把自己所属的月份
-    # 标成"已结清",于是系统建议记到再下一个月,整体错位一格。
+    # When computing allocation, **subtract this newly arrived payment** —
+    # otherwise it marks its own month as "settled", the system suggests the
+    # month after that, and everything shifts by one.
     recent_by_month: dict[str, float] = {}
     for r in recent:
         recent_by_month[r.month_bucket] = recent_by_month.get(r.month_bucket, 0) + r.amount
@@ -186,13 +205,14 @@ def gather_payment_context(node_input: PaymentClaim) -> PaymentContext:
     for r in rows:
         before_this = r.paypal_found - recent_by_month.get(r.month, 0)
         if before_this >= r.expected:
-            continue                      # 这笔钱之前就结清了,不是候选
+            continue                      # already settled before this payment; not a candidate
         if tenant_rec and rent_due_date(tenant_rec, r.month) <= today:
             due_unsettled.append(r.month)
         else:
             future_unsettled.append(r.month)
 
-    # 会计惯例:先冲最早的欠款;都没欠就是预付下一个到期月。
+    # Standard accounting practice: clear the oldest arrears first; if nothing is
+    # owed, it prepays the next month due.
     candidates = due_unsettled or future_unsettled[:1]
     suggested = candidates[0] if candidates else None
     if suggested and due_unsettled:
@@ -224,11 +244,13 @@ def gather_payment_context(node_input: PaymentClaim) -> PaymentContext:
 
 
 def _candidate_months(claim: PaymentClaim, lookback: int = 6) -> list[str]:
-    """这笔钱可能归属的月份,升序。
+    """The months this payment could belong to, ascending.
 
-    上界是猜测月份的**下一个月**(预付),再往后没到期。
-    下界是"有据可查的最早月份" —— 台账里记过、或 PayPal 查到过入账的最早那个月。
-    完全没有任何记录的远古月份不该出现在候选里,租客可能那时还没入住。
+    The upper bound is the month **after** the guessed one (prepayment); anything
+    beyond that isn't due yet. The lower bound is the earliest month on record —
+    the earliest with a ledger entry or a PayPal deposit. Ancient months with no
+    record at all shouldn't appear as candidates; the tenant may not even have
+    moved in yet.
     """
     upper = _shift_month(claim.month, 1)
     window = [_shift_month(claim.month, d) for d in range(-lookback, 2)]
@@ -245,17 +267,19 @@ def _candidate_months(claim: PaymentClaim, lookback: int = 6) -> list[str]:
     return [m for m in window if start <= m <= upper]
 
 
-RECENT_WINDOW_DAYS = 5      # "我刚转了" 的合理时间窗。PayPal eCheck 最长 3 个工作日
+RECENT_WINDOW_DAYS = 5      # a reasonable window for "I just sent it". A PayPal eCheck takes up to 3 business days
 
 
 def find_recent_payments(tenant_email: str, amount: float, around: str,
                          within_days: int = RECENT_WINDOW_DAYS) -> list[RecentTxn]:
-    """找出近期金额吻合的入账 —— 验证"我刚转了 X"这个具体声称。
+    """Find recent deposits with a matching amount — verifying the specific claim "I just sent X".
 
-    这是**确定性验证**,不是给模型判断的材料。找不到就是找不到,
-    此时绝不能对租客说任何暗示"我们收到了"的话。
+    This is **deterministic verification**, not material for the model to weigh.
+    Not found is not found, and in that case nothing may be said to the tenant
+    that implies "we received it".
 
-    ⚠️ 仍然只通过 _lookup_transactions() 读数据,mock 不外溢(CLAUDE.md 约束 5)。
+    ⚠️ Data still comes only through _lookup_transactions(); the mock does not
+       leak outward (CLAUDE.md constraint 5).
     """
     today = datetime.now().date()
     out: list[RecentTxn] = []
@@ -278,7 +302,7 @@ def _shift_month(month: str, delta: int) -> str:
 
 
 def _recent_months(around: str, span: int = 3) -> list[str]:
-    """以 around 为中心的前后几个月,升序。"""
+    """The months either side of `around`, ascending."""
     y, m = (int(x) for x in around.split("-"))
     out = []
     for delta in range(-span, span + 1):
@@ -290,41 +314,43 @@ def _recent_months(around: str, span: int = 3) -> list[str]:
 
 
 def send_month_question(node_input: str, ctx: Context):
-    """把问月份的短信发出去 —— 零风险动作,可自动发。"""
+    """Send the month question — a zero-risk action, so it may be sent automatically."""
     original = IncomingMessage.model_validate_json(ctx.user_content.parts[0].text)
     send_sms_now(original.gmail_thread_id, node_input)
     return Event(
-        message=(f"❓ {original.room_id} 声称付了房租但没说是哪个月\n"
-                 f"已自动发短信确认。账本查询结果已记录,待租客回复后再验证。")
+        message=(f"❓ {original.room_id} claimed a rent payment without saying which month\n"
+                 f"A confirmation text was sent automatically. The ledger lookup is "
+                 f"recorded; verification waits for the tenant's reply.")
     )
 
 
-# ---------------------------------------------------------------- 验证节点
-# 这是一个纯代码节点 —— 不调用任何 AI 模型。
-# 金额比对是确定性逻辑,交给模型做只会引入不必要的不确定性。
+# ------------------------------------------------------------ Verification node
+# This is a pure-code node — it calls no AI model.
+# Comparing amounts is deterministic logic; handing it to a model would only
+# introduce uncertainty we don't need.
 
 EXPECTED_RENT = 1000.00
 
 def verify_payment(node_input: PaymentClaim) -> PaymentVerification:
-    """比对租客声称的付款和账本记录,给出验证结论。"""
+    """Compare the tenant's claimed payment against the ledger and conclude."""
     txns = _lookup_transactions(node_input.tenant_email, node_input.month)
     total = sum(t["amount"] for t in txns)
     txn_id = txns[0]["txn_id"] if txns else None
 
     if not txns:
         status, note = "not_found", (
-            f"账本中未找到 {node_input.tenant_email} 在 {node_input.month} 的入账记录。"
-            "可能尚未到账,或付款邮箱与档案不符。"
+            f"No deposit found for {node_input.tenant_email} in {node_input.month}. "
+            "It may not have cleared yet, or the paying email may not match the file."
         )
     elif abs(total - EXPECTED_RENT) < 0.01:
-        status, note = "verified", f"已入账 ${total:.2f},与应付金额一致。"
+        status, note = "verified", f"${total:.2f} found, matching the amount due."
     elif total < EXPECTED_RENT:
         status, note = "amount_mismatch", (
-            f"已入账 ${total:.2f},应付 ${EXPECTED_RENT:.2f},"
-            f"尚欠 ${EXPECTED_RENT - total:.2f}。"
+            f"${total:.2f} found, ${EXPECTED_RENT:.2f} due, "
+            f"${EXPECTED_RENT - total:.2f} outstanding."
         )
     else:
-        status, note = "overpaid", f"已入账 ${total:.2f},超出应付金额。"
+        status, note = "overpaid", f"${total:.2f} found, more than the amount due."
 
     return PaymentVerification(
         room_id=node_input.room_id,
@@ -333,18 +359,21 @@ def verify_payment(node_input: PaymentClaim) -> PaymentVerification:
         claimed_amount=node_input.claimed_amount,
         expected_amount=EXPECTED_RENT,
         found_amount=total if txns else None,
+        found_date=txns[0]["date"] if txns else None,
         txn_id=txn_id,
         status=status,
         note=note,
     )
 
 
-# ---------------------------------------------------------------- 路由节点
-# 纯 if/else,不调模型。这正是 graph workflow 相对 prompt 编排的核心优势:
-# "验证通过才发回执" 是一条业务规则,不该交给模型自觉遵守。
+# ---------------------------------------------------------------- Routing nodes
+# Pure if/else, no model call. This is exactly where a graph workflow beats
+# prompt orchestration: "only send a receipt after verification passes" is a
+# business rule, and it should not depend on the model choosing to follow it.
 
 def verification_router(node_input: PaymentVerification):
-    # 兜底:月份不明本该在 month_router 就被分流,走到这里说明接线错了。
+    # Backstop: an unstated month should already have been split off at
+    # month_router, so reaching here means the wiring is wrong.
     if not node_input.month_stated:
         return Event(route="ESCALATE", output=node_input)
     if node_input.status == "verified":
@@ -352,42 +381,43 @@ def verification_router(node_input: PaymentVerification):
     return Event(route="ESCALATE", output=node_input)
 
 
-# ---------------------------------------------------------------- AI 节点
+# ---------------------------------------------------------------- AI nodes
 
 extract_claim = Agent(
     name="extract_claim",
     model="gemini-flash-latest",
-    instruction="""从租客短信中抽取付款信息。
+    instruction="""Extract the payment details from a tenant's text.
 
-输入含 message(原始短信)和 classification(分类结果)。
+The input contains message (the original text) and classification (the routing result).
 
-输出 PaymentClaim:
-- room_id、tenant_email —— **直接从 message.room_id / message.tenant_email
-  原样复制**。这两个字段是系统按电话号码认出来的,不要自己推断或改写。
-- claimed_amount —— 从 message.body 里抽金额(数字,不带货币符号)
+Output a PaymentClaim:
+- room_id, tenant_email — **copy them verbatim from message.room_id /
+  message.tenant_email**. The system resolved these two fields from the phone
+  number; do not infer or rewrite them.
+- claimed_amount — extract the amount from message.body (a number, no currency symbol)
 - claimed_method
-- month(格式 YYYY-MM)
-- month_stated —— **租客是否说出了一个没有歧义的具体月份**。
+- month (format YYYY-MM)
+- month_stated — **whether the tenant named an unambiguous, specific month**.
 
-  true 的唯一条件:出现了**月份名或月份数字**。
-      "rent for September" / "Sep rent" / "September's rent" / "9月房租"
+  The only condition for true: a **month name or month number** appears.
+      "rent for September" / "Sep rent" / "September's rent"
 
-  false —— 以下全部算 false,不要犹豫:
-      · 完全没提月份:"I sent the rent" / "转了房租"
-      · **相对说法**:"this month" / "next month" / "last month" /
-        "本月" / "这个月的"
-      · 只说了日期没说月份:"the payment I sent on the 30th"
+  false — all of the following are false; do not hesitate:
+      - no month at all: "I sent the rent"
+      - **relative phrasing**: "this month" / "next month" / "last month"
+      - a date without a month: "the payment I sent on the 30th"
 
-  ⚠️ **相对说法必须判 false。** 房租是预付的:8 月 31 日说的
-  "this month's rent",可能指 8 月(当前日历月),也可能指
-  即将到期的 9 月。这个歧义正是系统要问清楚的东西 ——
-  你替它猜一个,就等于把一笔钱记到了可能错误的月份。
+  ⚠️ **Relative phrasing must be false.** Rent is paid in advance: "this month's
+  rent" said on August 31 may mean August (the current calendar month) or the
+  September rent about to come due. That ambiguity is exactly what the system
+  needs to resolve — guessing on its behalf books the money to a possibly wrong month.
 
-⚠️ month_stated=false 时 month 仍填最佳猜测(房租预付,通常是下个月),
-   但**必须**把 month_stated 标成 false。这个字段决定系统要不要发短信
-   找租客确认,填错会把钱记到错误的月份。
+⚠️ When month_stated=false, still fill month with your best guess (rent is
+   prepaid, so usually the next month), but you **must** mark month_stated false.
+   That field decides whether the system texts the tenant to confirm, and getting
+   it wrong books the money to the wrong month.
 
-如果短信里没有明确的金额,claimed_amount 填 0。不要猜测。""",
+If the text contains no explicit amount, set claimed_amount to 0. Do not guess.""",
     output_schema=PaymentClaim,
 )
 
@@ -396,27 +426,36 @@ ask_month_agent = Agent(
     model="gemini-flash-latest",
     input_schema=PaymentContext,
     tools=[TENANT_SMS_SKILL],
-    instruction="""租客说交了房租,但没说是哪个月的。写一条短信。
+    instruction="""The tenant says they paid rent but didn't say which month. Write one text.
 
-**先加载 tenant-sms 技能,读 SKILL.md 的「信息披露纪律」和
-references/payment.md 的「场景 B」。**
+**First load the tenant-sms skill and read "Disclosure discipline" in SKILL.md
+plus "Scenario B" in references/payment.md.**
 
-**第一分叉是 has_recent_match,不是月份:**
-- has_recent_match=true  -> B-A:钱验证到账了,**陈述归属结论**不要开放式提问。
-  suggested_month / suggested_reason 是代码用确定性规则算好的,直接用。
-  suggestion_is_certain=true  -> B-A1:说金额+日期+归属+理由+纠正口子
-  suggestion_is_certain=false -> B-A2:列出具体候选月份让租客选
-  租客用了 "this month" 这类相对说法时,要直接点破歧义
-- has_recent_match=false -> B-B:明确说"还没看到这笔",要 confirmation number、
-  日期、付款邮箱。**绝不**说任何暗示我们收到了的话
-- amount_matches_rent=false -> 叠加 B-C,把金额差异一起问
+**The first fork is has_recent_match, not the month:**
+- has_recent_match=true  -> B-A: the money is verified, so **state the conclusion**
+  rather than asking an open question. suggested_month / suggested_reason were
+  computed by deterministic code; use them directly.
+  suggestion_is_certain=true  -> B-A1: the check, the amount, the date, the
+  allocation, the reason, and room to correct
+  suggestion_is_certain=false -> B-A2: list the specific candidate months and let
+  the tenant choose
+  If the tenant used relative phrasing like "this month", name the ambiguity directly
+- has_recent_match=false -> B-B: say plainly that we don't see it yet, and ask for
+  the confirmation number, the date, and the paying email. **Never** say anything
+  implying we received it
+- amount_matches_rent=false -> layer in B-C and raise the amount discrepancy too
 
-**绝对不能违反的一条:不要把 unsettled_months 或任何台账状态告诉租客。**
-说"其他月份都结清了,这笔是不是 10 月的"等于把答案喂给虚报付款的人 ——
-他只要回一句"是",台账里就多一条不存在的付款声明。
-只能说出租客本来就知道的事:他自己转的那一笔。
+**Disclosure of ledger status follows verification:**
+- When has_recent_match=false, **never** mention the settled status of any month.
+  Saying "every other month is settled, so is this one for October" hands the
+  answer to someone making a false payment claim — they only have to reply "yes"
+  and the ledger gains a payment that never existed. At that point you may state
+  only what the tenant already knows: the payment they say they sent.
+- When has_recent_match=true, the month status directly tied to this payment
+  **should be stated plainly** (suggested_reason already contains the reason),
+  but do not enumerate the ledger month by month.
 
-只输出短信正文。""",
+Output only the body of the text message.""",
     output_schema=str,
 )
 
@@ -426,38 +465,45 @@ draft_receipt = Agent(
     model="gemini-flash-latest",
     input_schema=PaymentVerification,
     tools=[TENANT_SMS_SKILL],
-    # ⚠️ instruction 里绝对不要出现花括号。ADK 会对 instruction 跑
-    # inject_session_state,把 {foo} 当 session state 变量查找,查不到直接
-    # KeyError。2.0 靠节点返回值传数据,月份和金额从 input_schema 进来即可。
-    instruction="""起草一条给租客的付款回执短信草稿。
+    # ⚠️ Never put curly braces in an instruction. ADK runs inject_session_state
+    # over instructions and treats {foo} as a session state variable to look up;
+    # when it isn't found you get a KeyError. In 2.0 data arrives via node return
+    # values, so the month and amount come in through input_schema.
+    instruction="""Draft a payment receipt text for the tenant.
 
-**先加载 tenant-sms 技能,读 references/payment.md 的「场景 A」。**
-措辞规范以技能里的为准。
+**First load the tenant-sms skill and read "Scenario A" in references/payment.md.**
+The wording standard there governs.
 
-输入是一条 PaymentVerification 记录,里面有月份 month 和账本查到的
-金额 found_amount。这两个值从输入里读,不要编造。
+The input is a PaymentVerification record containing the month, the amount found
+in the ledger (found_amount), and the deposit date (found_date). Read those
+values from the input; do not invent them.
 
-**用英文写** —— 租客只看英文。
+**Write in English** — tenants read English only.
 
-措辞要求(这是硬约束,不是建议):
-- 只能说 "we have received your payment notice for ... rent"
-- 绝对不能说 "payment confirmed" / "payment received" / "funds received" /
-  "your rent has been received" —— 我们只是收到了租客的付款通知,
-  无法验证 PayPal 真实到账。这两件事在租务纠纷里是不同的法律事实。
-- 简短、友好、不超过两句话
-- 不要承诺任何本次付款之外的事情
+Wording requirements (these are hard constraints, not suggestions):
+- State the check and its result: "We've checked our PayPal account and see
+  your ... payment received on ..." — the amount comes from found_amount and the
+  date from found_date (if it is None in the input, write no date). Invent no number
+- For allocation say "we've noted it toward ... rent". Never say
+  "your account is settled" / "you're all paid up" — you are asserting that this
+  one transaction arrived, not a settled-in-full state (landlord's requirement,
+  2026-09-01; see CLAUDE.md constraint 3)
+- Precision beats brevity, but stay within 4 sentences
+- Promise nothing beyond this payment
 
-只输出短信正文,不要加任何前后说明。""",
+Output only the body of the text message, with no surrounding commentary.""",
     output_schema=str,
 )
 
 
 def deliver_receipt(node_input: str, ctx: Context):
-    """把回执**存成 Gmail 草稿**,并写付款台账。
+    """Save the receipt **as a Gmail draft** and write the payment ledger.
 
-    ⚠️ 存草稿不发送。回执是财务凭证,按 CLAUDE.md 约束 1 必须人工点发送。
-    台账状态写 claimed 而不是 confirmed —— 租客声称付款、我们查到了记录,
-    但"房东确认"是另一个动作,两个状态不能合并。
+    ⚠️ Draft, do not send. A receipt is a financial record, and CLAUDE.md
+    constraint 1 requires a human to hit send.
+    The ledger status is claimed, not confirmed — the tenant claims a payment and
+    we found a record, but "the landlord confirmed" is a separate action and the
+    two states must not be merged.
     """
     original = IncomingMessage.model_validate_json(ctx.user_content.parts[0].text)
     draft_id = draft_sms_reply(original.gmail_thread_id, node_input)
@@ -469,34 +515,37 @@ def deliver_receipt(node_input: str, ctx: Context):
         status="claimed",
     )
     return Event(
-        message=(f"💰 {original.room_id} 回执草稿已生成(草稿 {draft_id})\n"
-                 f"台账已记 claimed。**打开 Gmail 点发送才会发给租客。**")
+        message=(f"💰 {original.room_id} receipt draft created (draft {draft_id})\n"
+                 f"Ledger recorded as claimed. **It reaches the tenant only when "
+                 f"you open Gmail and hit send.**")
     )
 
 
 def escalate_to_landlord(node_input: PaymentVerification):
-    """金额不符或查无记录 —— 不自动回复,转给房东。"""
+    """Amount mismatch or nothing found — no automatic reply; hand it to the landlord."""
     return Event(
         message=(
-            f"⚠️ {node_input.room_id} 付款需人工处理\n"
-            + ("❓ 租客没说是哪个月的房租,已自动发短信确认\n"
+            f"⚠️ {node_input.room_id} payment needs a human\n"
+            + ("❓ The tenant didn't say which month; a confirmation text was sent automatically\n"
                if not node_input.month_stated else "")
-            + f"状态:{node_input.status}\n"
-            f"租客声称:${node_input.claimed_amount:.2f}\n"
+            + f"Status: {node_input.status}\n"
+            f"Tenant claims: ${node_input.claimed_amount:.2f}\n"
             f"{node_input.note}"
         )
     )
 
 
-# ---------------------------------------------------------------- 图
-# START → 抽取 → 验证(纯代码) → 路由(纯代码) → 两条分支
+# ---------------------------------------------------------------- The graph
+# START -> extract -> verify (pure code) -> route (pure code) -> two branches
 
 payment_workflow = Workflow(
     name="payment_workflow",
     edges=[
         ("START", extract_claim, month_router),
-        # 月份没说清 -> 查台账和 PayPal,带着已知信息去问,不进验证流程。
-        # "验证 9 月房租" 和 "验证 8 月房租" 是两个问题,月份不定就没得验。
+        # Month unstated -> check the ledger and PayPal, ask using what we know,
+        # and stay out of the verification flow. "Verify September rent" and
+        # "verify August rent" are two questions; with the month undetermined
+        # there is nothing to verify.
         (month_router, {
             "MONTH_CLEAR": verify_payment,
             "MONTH_UNCLEAR": gather_payment_context,

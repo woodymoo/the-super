@@ -1,9 +1,9 @@
-"""The Super —— 根 workflow。
+"""The Super — the root workflow.
 
-START → 分类 → 路由
-  · PAYMENT     → payment_workflow
-  · MAINTENANCE → maintenance_workflow
-  · OTHER       → 标记待人工处理(不猜)
+START -> classify -> route
+  - PAYMENT     -> payment_workflow
+  - MAINTENANCE -> maintenance_workflow
+  - OTHER       -> flag for a human (never guess)
 """
 
 from google.adk import Agent, Event, Workflow
@@ -20,29 +20,33 @@ classifier = Agent(
     name="classifier",
     model="gemini-flash-latest",
     input_schema=IncomingMessage,
-    instruction="""判断这条租客消息属于哪一类。
+    instruction="""Classify this tenant message.
 
-- PAYMENT —— 提到已付款、PayPal、Zelle、转账、房租金额
-- MAINTENANCE —— 报修、损坏、故障、不工作、漏水、没热水、投诉居住问题
-- OTHER —— 其他一切(询问、搬家通知、闲聊、无法判断)
+- PAYMENT — mentions a payment made, PayPal, Zelle, a transfer, or a rent amount
+- MAINTENANCE — a repair, damage, a fault, something not working, a leak, no hot
+  water, or a complaint about living conditions
+- OTHER — everything else (questions, move-out notice, small talk, undecidable)
 
-**置信度规则:**
-只有当消息明确无歧义时才填 high。任何含糊、同时涉及两类、
-或你需要猜测的情况,一律填 low。
+**Confidence rule:**
+Use high only when the message is explicit and unambiguous. Anything vague, or
+spanning both categories, or requiring you to guess, is low.
 
-reason 用一句话说明判断依据。
+Give a one-sentence reason for the call.
 
-宁可误判为 OTHER,也不要把不确定的消息塞进 PAYMENT ——
-错误写入付款台账的代价,远大于让房东多看一眼。""",
+Prefer misclassifying as OTHER over forcing an uncertain message into PAYMENT —
+the cost of a wrong entry in the payment ledger far exceeds the cost of making
+the landlord glance at one extra message.""",
     output_schema=Classification,
 )
 
 
 def intent_router(node_input: Classification, ctx: Context):
-    """置信度低的一律转人工,不进自动流程。
+    """Anything low-confidence goes to a human and never enters the automatic flow.
 
-    同时把原始消息取回来往下传 —— 分类结果里没有租客原话,
-    而付款抽取和维修定级都需要原文。ctx.user_content 是工作流的初始输入。
+    It also recovers the original message and passes it onward — the
+    classification result does not carry the tenant's own words, and both payment
+    extraction and maintenance triage need the original text. ctx.user_content is
+    the workflow's initial input.
     """
     original = IncomingMessage.model_validate_json(ctx.user_content.parts[0].text)
     routed = RoutedMessage(message=original, classification=node_input)
@@ -56,39 +60,43 @@ holding_reply_agent = Agent(
     model="gemini-flash-latest",
     input_schema=RoutedMessage,
     tools=[TENANT_SMS_SKILL],
-    instruction="""这条消息系统判断不该自己处理 —— 分类不确定,或涉及租约、
-押金、法律等需要房东本人判断的事。
+    instruction="""The system judged that it should not handle this message itself —
+either the classification is uncertain, or it touches the lease, the deposit, or
+legal matters that need the landlord's own judgment.
 
-写一条**缓冲回复**:确认收到,说明会有人跟进,**不表任何态**。
+Write a **holding reply**: confirm receipt, say someone will follow up, and
+**take no position at all**.
 
-**先加载 tenant-sms 技能,读 references/holding.md** ——
-里面按情形分了几种写法(分类不确定 / 涉及租约押金 / 涉及法律投诉 /
-疑似紧急安全),选对应的那种。
+**First load the tenant-sms skill and read references/holding.md** — it splits
+into several variants by situation (classification uncertain / lease or deposit /
+legal or complaint / possible safety emergency). Pick the matching one.
 
-⚠️ 绝不回应实质内容,哪怕问题看起来很简单。
-⚠️ 绝不承诺时限。
-⚠️ 涉及法律时字越少越好。
+⚠️ Never respond to the substance, however simple the question looks.
+⚠️ Never promise a timeframe.
+⚠️ For legal matters, fewer words is better.
 
-只输出短信正文。""",
+Output only the body of the text message.""",
     output_schema=str,
 )
 
 
 def send_holding_reply(node_input: str, ctx: Context):
-    """把缓冲回复发出去,同时通知房东。
+    """Send the holding reply and notify the landlord.
 
-    为什么这条可以自动发:它不承诺任何事,是系统能发的最安全的对外消息。
-    而在有它之前,这类消息的结果是"通知房东、租客那边完全静默" ——
-    沉默本身会激化矛盾,而且在纠纷里对房东不利。
+    Why this one may be sent automatically: it commits to nothing, which makes it
+    the safest outbound message the system can send. Before it existed, the
+    outcome for these messages was "notify the landlord, and the tenant hears
+    nothing at all" — and that silence escalates the conflict by itself, which
+    works against the landlord in a dispute.
     """
     original = IncomingMessage.model_validate_json(ctx.user_content.parts[0].text)
     send_sms_now(original.gmail_thread_id, node_input)
     return Event(
         message=(
-            f"📥 一条消息需要你看一下\n"
-            f"来自:{original.room_id}\n"
-            f"原文:「{original.body}」\n"
-            f"已自动回复租客:已收到,稍后答复(不表态)。"
+            f"📥 A message needs your attention\n"
+            f"From: {original.room_id}\n"
+            f"Original: \u201c{original.body}\u201d\n"
+            f"Auto-replied to the tenant: received, we'll follow up (no position taken)."
         )
     )
 

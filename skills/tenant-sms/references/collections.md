@@ -1,60 +1,79 @@
-# 房租催缴短信
+# Rent collection SMS
 
-## 法律时间线(决定了措辞的边界)
+## ⚠️ Jurisdiction
+
+The timeline below (5 full days overdue → 14-day notice) is the rule for **the
+state this property is in**. **Re-check it before operating in another state or
+for another property** — cure periods and notice periods differ by state, and
+carrying the wrong timeline over leaves the whole collection track legally
+unsound.
+
+`CURE_PERIOD_DAYS` in `rent.py` is where this rule lands in code; change it
+together with the jurisdiction.
+
+## The legal timeline (which is what bounds the wording)
 
 ```
-应付日          —— 当天不算逾期
-应付日 + 1 天   —— 发催缴,给 5 天补缴期
-补缴期满         —— 此时逾期满 5 天,房东才有资格启动 14 天通知程序
+Due date              — not late that day
+Due date + 1 day      — send collection, with a 5-day cure period
+End of cure period    — now 5 days overdue; only now may the landlord start the 14-day notice process
 ```
 
-5 天这个数字不是随便定的:**房租逾期满 5 天以上,才可以发 14 天通知。**
-所以补缴期设成 5 天,既给了租客机会,也让时间线自然衔接到下一步。
+The number 5 is not arbitrary: **rent must be more than 5 days overdue before a
+14-day notice may be sent.** Setting the cure period to 5 days therefore both
+gives the tenant a real chance and lines the timeline up with the next step.
 
-## agent 在这条线上的位置
+## Where the agent sits on this track
 
-**只写第一级催缴。** 14 天通知**不生成**,因为:
-- 它有法定的形式和内容要求
-- 短信通常不构成有效送达
-- 形式不合规的通知可能**污染后续的正式程序**
+**It writes the first-stage collection only.** It does **not** generate the
+14-day notice, because:
+- That notice has statutory form and content requirements
+- An SMS generally does not constitute valid service
+- A defective notice can **contaminate the formal process that follows**
 
-到了该发 14 天通知的时候,agent 的正确动作是通知房东,不是自己写。
+When it is time for a 14-day notice, the agent's correct action is to tell the
+landlord, not to write it.
 
-## 第一级催缴措辞
+## First-stage collection wording
 
-### 完全没收到
+### Nothing received
 
 > Hi Sarah, your October rent of $1,000 was due on October 1 and we haven't
 > received it yet. Could you take care of it by October 6? If you've already
 > sent it, just reply with the date and method — PayPal eChecks can take up
 > to 3 business days to clear and we'll re-check.
 
-### 少付
+### Partial payment
 
 > Hi Sarah, your October rent was due on October 1. We received $600, which
 > leaves $400 outstanding. Could you send the remainder by October 6? If
 > you've already sent it, let us know the date and method and we'll re-check.
 
-## 措辞要点
+## Wording requirements
 
-**必须有的:**
-- 应付日(具体日期,不是"上个月")
-- 金额(没收到就写全额,少付就写三个数:收到/应付/差额)
-- 补缴截止日(具体日期)
-- 「如果你已经付了」的余地 + eCheck 说明
+**Must be present:**
+- The due date (an actual date, not "last month")
+- The amount (the full amount if nothing came in; all three numbers —
+  received / due / gap — if it was partial)
+- The cure deadline (an actual date)
+- Room for "if you've already paid" + the eCheck explanation
 
-**绝对不能有的:**
-- 任何法律措辞:legal action / eviction / attorney / court / notice
-- 任何威胁性表述:"or else" / "final warning" / "we will have no choice"
-- 滞纳金金额 —— 那取决于租约条款,agent 不读租约
-- 对租客的评价:"again" / "as usual" / "you always"
+**Must never appear:**
+- Any legal language: legal action / eviction / attorney / court / notice
+- Any threat: "or else" / "final warning" / "we will have no choice"
+- A late-fee amount — that depends on the lease terms, and the agent does not
+  read the lease
+- Any judgment of the tenant: "again" / "as usual" / "you always"
 
-**语气校准:** 这条短信将来可能被人读到(租客、律师、法官)。
-写的时候假设它会被读。既不能软到没有留痕效果,也不能硬到显得是威胁。
-**纯事实陈述 + 一个明确的动作 + 一个台阶**,就是正确的温度。
+**Calibrating the tone:** this text may later be read by someone — the tenant, a
+lawyer, a judge. Write it assuming it will be. It can be neither so soft that it
+leaves no record nor so hard that it reads as a threat.
+**Plain factual statement + one clear action + one way out** is the right
+temperature.
 
-## 为什么要给台阶
+## Why there must be a way out
 
-租客可能真的付了。PayPal eCheck 最长 3 个工作日,而且租客可能用了
-档案之外的邮箱付款。发一条不留余地的催缴给一个已经付了钱的人,
-是这个系统能犯的最尴尬的错误。
+The tenant may genuinely have paid. A PayPal eCheck takes up to 3 business days,
+and the tenant may have paid from an email that isn't on file. Sending an
+unconditional demand to someone who already paid is the most embarrassing
+mistake this system can make.

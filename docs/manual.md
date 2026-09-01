@@ -1,79 +1,83 @@
-# 使用手册
+# User Manual
 
 ---
 
-## 一、最重要的一件事:没有任何东西在后台运行
+## 1. The single most important thing: nothing runs in the background
 
-这**不是**一个常驻服务。你发一条短信,系统不会有任何反应 ——
-除非有人执行 `python main.py poll`。
+This is **not** a resident service. You send a text and the system does nothing
+at all — unless someone runs `python main.py poll`.
 
 ```
-你发短信  ──►  Google Voice 转成邮件进 Gmail  ──►  [ 停在这里,等着 ]
-                                                         │
-                        只有你跑 `main.py poll` 才会继续 ─┘
+You text  ──►  Google Voice forwards it as email into Gmail  ──►  [ it stops here and waits ]
+                                                                            │
+                       it only continues when you run `main.py poll` ───────┘
 ```
 
-这是**故意的设计**(见 `CLAUDE.md` 架构约束 4)。agent 保持无状态,
-等待靠"记一笔然后退出、下一轮再看"实现。让容器常驻空等会一直烧钱。
+This is **deliberate** (see architectural constraint 4 in `CLAUDE.md`). The agent
+stays stateless, and waiting is implemented as "record it, exit, look again next
+round". Keeping a container alive to idle costs money continuously.
 
-生产环境里由 Cloud Scheduler 每 5–15 分钟叫醒一次;开发和 demo 阶段就是你手动跑。
+In production Cloud Scheduler wakes it every 5–15 minutes; during development and
+the demo, you run it by hand.
 
 ---
 
-## 二、三种运行方式,别搞混
+## 2. The three ways to run it — don't mix them up
 
-| 命令 | 读真实 Gmail? | 调 Gemini? | 会发短信? | 用途 |
+| Command | Reads real Gmail? | Calls Gemini? | Sends texts? | Purpose |
 |---|---|---|---|---|
-| `python main.py poll` | ✅ 是 | ✅ 是 | ✅ 会 | 真实处理新消息 |
-| `python demo.py <场景>` | ❌ 否 | ✅ 是 | ⚠️ 走 DRY_RUN | 演示,用假消息 |
-| `python demo.py rent <日期>` | ❌ 否 | ❌ 否 | ❌ 不会 | 纯计算,模拟日期 |
+| `python main.py poll` | ✅ yes | ✅ yes | ✅ yes | Really process new messages |
+| `python demo.py <scenario>` | ❌ no | ✅ yes | ⚠️ under DRY_RUN | Demo, with fake messages |
+| `python demo.py rent <date>` | ❌ no | ❌ no | ❌ no | Pure computation with a simulated date |
 
-`demo.py rent` **完全不碰 Gmail**,它只是把房租状态算出来打印。
-你在另一个窗口跑它,不会对刚发的短信产生任何影响 —— 那是两条独立的路。
+`demo.py rent` **never touches Gmail**; it just computes the rent status and
+prints it. Running it in another window has no effect on the text you just sent —
+they are two independent paths.
 
 ---
 
-## 三、`DRY_RUN` 安全开关
+## 3. The `DRY_RUN` safety switch
 
-`the_super/.env` 里:
-
-```
-DRY_RUN=true     # 所有发送/建草稿只打日志,不真的执行
-DRY_RUN=false    # 真的发出去
-```
-
-**第一次对真实邮箱跑务必保持 `true`。** 短信发出去撤不回。
-
-`true` 时你会看到:
+In `the_super/.env`:
 
 ```
-[DRY_RUN] 本应发送 -> thread=1a05804f1204...
+DRY_RUN=true     # every send/draft only logs; nothing actually happens
+DRY_RUN=false    # really send
+```
+
+**Keep it `true` for the first run against a real mailbox.** A sent text cannot
+be recalled.
+
+With `true` you will see:
+
+```
+[DRY_RUN] would send -> thread=1a05804f1204...
 Hi, we have received your maintenance report regarding...
 ```
 
 ---
 
-## 四、完整跑一遍(手机 → agent → 手机)
+## 4. A full round trip (phone → agent → phone)
 
-### 准备
+### Setup
 
 ```bash
 cd the-super
 source .venv/bin/activate
-python authorize.py       # 确认 OAuth token 有效(Testing 状态 7 天过期)
+python authorize.py       # confirm the OAuth token is valid (7-day expiry while in Testing)
 ```
 
-确认 `.env` 里 `DRY_RUN=true`。
+Confirm `DRY_RUN=true` in `.env`.
 
-### 第 1 步:用手机发短信
+### Step 1: text from your phone
 
-给你的 Google Voice 号发(**英文**,租客只看英文):
+Send to your Google Voice number (**in English** — tenants read English only):
 
 > `The toilet is leaking.`
 
-等 10–30 秒让 Voice 转发到 Gmail。
+Wait 10–30 seconds for Voice to forward it to Gmail.
 
-### 第 2 步:确认收到了
+### Step 2: confirm it arrived
 
 ```bash
 python -c "
@@ -82,104 +86,112 @@ from the_super.tools.gmail import read_new_messages
 for m in read_new_messages(): print(f'[{m.source}] {m.room_id}: {m.body}')"
 ```
 
-看到 `[sms] 1F-A: The toilet is leaking.` 就对了。
+Seeing `[sms] 1F-A: The toilet is leaking.` means it worked.
 
-⚠️ 这条命令会**消费游标** —— 读过的消息记进 `history_cursor.json`,
-下次不会再返回。要重放就先 `rm -f the_super/fixtures/history_cursor.json`。
+⚠️ This command **consumes the cursor** — messages that have been read are
+recorded in `history_cursor.json` and won't come back. To replay, first run
+`rm -f the_super/fixtures/history_cursor.json`.
 
-### 第 3 步:跑完整管道
+### Step 3: run the full pipeline
 
 ```bash
-rm -f the_super/fixtures/history_cursor.json   # 允许重放刚才那条
+rm -f the_super/fixtures/history_cursor.json   # allow that message to replay
 python main.py poll
 ```
 
-会看到分类 → 定级 → 起草 → 发送(DRY_RUN 下只打日志)。
+You'll see classification → severity → drafting → sending (log-only under DRY_RUN).
 
-### 第 4 步:真的发出去
+### Step 4: actually send it
 
-改 `.env` 里 `DRY_RUN=false`,重跑第 3 步。
-几秒后你手机会收到 agent 的英文回复,要你拍照片。
+Set `DRY_RUN=false` in `.env` and re-run step 3.
+A few seconds later your phone receives the agent's English reply asking for photos.
 
-**这就是完整闭环。** 录 demo 时这段最有说服力。
+**That is the complete round trip.** It is the most convincing segment to record.
 
 ---
 
-## 四点五、改 agent 说话的方式:不用改代码
+## 4.5. Changing how the agent speaks — without changing code
 
-所有对租客的措辞规范在 `skills/tenant-sms/`,是普通的 markdown:
+Every wording standard for tenants lives in `skills/tenant-sms/` as ordinary markdown:
 
-| 文件 | 管什么 |
+| File | What it governs |
 |---|---|
-| `SKILL.md` | 铁律(禁用表述)、语气、reference 目录 |
-| `references/payment.md` | 回执、月份不明的三种问法、少付、多付、查无记录 |
-| `references/maintenance.md` | 按设备类型该拍哪些部位、紧急自救指引 |
-| `references/collections.md` | 催缴各阶段措辞 + 法律时间线 |
-| `references/holding.md` | 缓冲回复的四个档位 |
+| `SKILL.md` | Hard rules (forbidden phrasing), tone, and the reference index |
+| `references/payment.md` | Receipts, the branches for an unstated month, underpaid, overpaid, not found |
+| `references/maintenance.md` | Which spots to photograph per fixture type, emergency self-help |
+| `references/collections.md` | Wording per collection stage + the legal timeline |
+| `references/holding.md` | The four grades of holding reply |
 
-**改这些文件就能改 agent 的说话方式,不用动 Python,不用重启。**
-下次运行时模型会读到新内容。
+**Editing these files changes how the agent speaks — no Python changes, no
+restart.** The model picks up the new content on the next run.
 
-用的是 ADK 2.0 的 Skills 机制,按需加载 —— 模型先看 `SKILL.md` 的目录,
-判断这次要哪个 reference 再去读。所以规则写多细都不会撑爆上下文。
+It uses the ADK 2.0 Skills mechanism with on-demand loading: the model reads the
+index in `SKILL.md`, decides which reference this case needs, and reads only that
+one. So the rules can be as detailed as you like without blowing up the context.
 
-⚠️ **但只有"怎么说"归 Skill。**
-"金额相不相符""月份说没说清""能不能自动发" 这类判定是确定性代码
-(`payment.py` / `rent.py`)。在 SKILL.md 里写"金额差一点也可以放行"是没用的 ——
-路由根本不读它。
+⚠️ **But only "how to say it" belongs to the Skill.**
+Judgments like "does the amount match", "was the month stated clearly", and "may
+this be auto-sent" are deterministic code (`payment.py` / `rent.py`). Writing
+"a small amount difference is acceptable" in SKILL.md does nothing — the router
+never reads it.
 
 ---
 
-## 五、什么会自动发,什么只存草稿
+## 5. What is sent automatically, and what is only drafted
 
-| 类型 | 行为 | 为什么 |
+| Type | Behavior | Why |
 |---|---|---|
-| 索要照片的短信 | ✅ **自动发** | 零风险,说错了最多再问一次 |
-| 问"这是哪个月的房租" | ✅ **自动发** | 同上,而且不问就会记错月份 |
-| 缓冲回复(收到了,稍后答复) | ✅ **自动发** | 不承诺任何事,是最安全的对外消息 |
-| 房租催缴短信 | ✅ **自动发** | 房东明确要求(覆盖了原约束 1) |
-| 给房东的日报/汇总 | ✅ **自动发** | 收件人是房东本人 |
-| 付款回执 | 📝 **存 Gmail 草稿** | 财务凭证,必须人工点发送 |
-| 派单简报 | 📝 **落库待批准** | 要花钱 |
-| 金额不符 / 查无记录 | 🚫 **不回复租客** | 直接转人工 |
-| 14 天法定通知 | 🚫 **根本不生成** | 短信不构成法定送达,必须走线下 |
+| Text asking for photos | ✅ **auto-sent** | Zero risk; worst case you ask again |
+| Asking "which month is this rent for" | ✅ **auto-sent** | Same, and not asking means booking the wrong month |
+| Holding reply (received, we'll follow up) | ✅ **auto-sent** | Commits to nothing; the safest outbound message |
+| Rent collection text | ✅ **auto-sent** | Explicitly requested by the landlord (overrides the original constraint 1) |
+| Daily digest / summary to the landlord | ✅ **auto-sent** | The recipient is the landlord themselves |
+| Payment receipt | 📝 **saved as a Gmail draft** | It is a financial record; a human must hit send |
+| Dispatch brief | 📝 **stored pending approval** | It spends money |
+| Amount mismatch / nothing found | 🚫 **no reply to the tenant** | Escalated to a human directly |
+| 14-day statutory notice | 🚫 **never generated** | An SMS is not valid service; this must happen offline |
 
-### 关于缓冲回复
+### About holding replies
 
-分类不确定、涉及租约/押金/法律的消息,系统**不处理实质内容**,
-但会自动回一条"已收到,会有人跟进",然后通知你。
+For messages that are unclear or that touch the lease, the deposit, or legal
+matters, the system **does not engage with the substance** — but it does
+automatically reply "received, someone will follow up" and then notify you.
 
-在有这条之前,这类消息的结果是"通知房东、租客那边完全静默"。
-租客发了一条关于押金的短信,两天没有任何回应 —— 这种沉默会激化矛盾,
-而且在纠纷里对房东不利("我发过消息,从来没人理我")。
+Before this existed, the outcome for such messages was "notify the landlord, and
+the tenant hears nothing at all". A tenant sends a text about their deposit and
+gets no response for two days — that silence escalates the conflict, and in a
+dispute it works against the landlord ("I sent a message and nobody ever
+replied").
 
-措辞分四个档位(见 `references/holding.md`),涉及法律时最短、不表任何态。
+The wording comes in four grades (see `references/holding.md`); the legal one is
+the shortest and takes no position at all.
 
-回执存成草稿后,你**打开 Gmail 点发送**就行,不需要任何自定义界面,手机上也能操作。
+Once a receipt is saved as a draft, you just **open Gmail and hit send** — no
+custom interface needed, and it works from a phone.
 
 ---
 
-## 六、三个触发器
+## 6. The three triggers
 
 ```bash
-python main.py poll      # 拉新消息 → 分类 → 走对应分支
-python main.py rent      # 房租周期:按各自应付日检查,逾期次日发催缴
-python main.py digest    # 日报:发短信给房东,含超时未收到照片的工单
+python main.py poll      # fetch new messages → classify → take the matching branch
+python main.py rent      # rent cycle: check each unit's own due day; collection the day after it is late
+python main.py digest    # daily digest: SMS to the landlord, including tickets overdue on photos
 ```
 
-生产环境用 Cloud Scheduler 分别调用:
-poll 每 5–15 分钟、rent 每天一次、digest 每天傍晚。
+In production Cloud Scheduler calls them separately: poll every 5–15 minutes,
+rent once a day, digest each evening.
 
-### 本地定时(可选)
+### Local scheduling (optional)
 
-macOS 用 launchd。注意 `main.py` 自己会加载 `.env`,
-所以 plist 里不需要重复声明环境变量:
+Use launchd on macOS. Note that `main.py` loads `.env` itself, so the plist does
+not need to redeclare environment variables:
 
 ```xml
 <key>ProgramArguments</key>
 <array>
-  <string>/绝对路径/the-super/.venv/bin/python</string>
-  <string>/绝对路径/the-super/main.py</string>
+  <string>/absolute/path/the-super/.venv/bin/python</string>
+  <string>/absolute/path/the-super/main.py</string>
   <string>poll</string>
 </array>
 <key>StartInterval</key><integer>600</integer>
@@ -187,52 +199,57 @@ macOS 用 launchd。注意 `main.py` 自己会加载 `.env`,
 
 ---
 
-## 七、常见问题
+## 7. Troubleshooting
 
-**发了短信没反应**
-→ 没有后台进程。跑 `python main.py poll`。
+**I sent a text and nothing happened**
+→ There is no background process. Run `python main.py poll`.
 
-**跑了 poll 但读不到消息**
-→ 消息已被游标记为处理过。`rm -f the_super/fixtures/history_cursor.json` 重放。
+**poll ran but read no messages**
+→ The message is already marked processed by the cursor. Run
+   `rm -f the_super/fixtures/history_cursor.json` to replay.
 
-**读到了但认不出租客**
-→ 发信号码不在 `fixtures/tenants.json` 里。`identify_tenant` 认不出的消息会被跳过。
+**It read the message but can't identify the tenant**
+→ The sending number isn't in `fixtures/tenants.json`. Messages that
+   `identify_tenant` can't resolve are skipped.
 
-**没收到 agent 的回复**
-→ 检查 `.env` 里 `DRY_RUN` 是不是还是 `true`。
+**No reply from the agent**
+→ Check whether `DRY_RUN` in `.env` is still `true`.
 
-**催缴短信发不出去**
-→ Voice 没有"主动给某号码发短信"的接口,只能回复已有邮件线程。
-   该租客必须先给你的 Voice 号发过短信,系统才记得下线程 id
-   (存在 `fixtures/threads.json`)。汇总里会标 `⚠️ 无短信线程,未发出`。
+**Collection texts won't send**
+→ Voice has no interface for texting a number out of the blue; it can only reply
+   to an existing email thread. That tenant must have texted your Voice number at
+   least once for the system to have recorded a thread id (stored in
+   `fixtures/threads.json`). The summary marks these as
+   `⚠️ no SMS thread, not sent`.
 
 **`KeyError: Context variable not found`**
-→ 某个 Agent 的 instruction 里出现了 `{}`。ADK 会把花括号当 session state
-   变量注入。instruction 里不能有花括号。
+→ Some Agent's instruction contains `{}`. ADK treats curly braces as session
+   state variables to inject. Instructions must not contain curly braces.
 
-**OAuth 报 403 access_denied**
-→ 这个 Gmail 账号不在 OAuth 同意屏幕的"测试用户"名单里。
+**OAuth returns 403 access_denied**
+→ This Gmail account isn't in the "test users" list on the OAuth consent screen.
 
-**token 突然失效**
-→ Testing 状态下 refresh token 7 天过期。重跑 `python authorize.py`。
-   `gmail.modify` 是 restricted scope,要脱离 Testing 必须过完整审核,绕不开。
+**The token suddenly stopped working**
+→ While in Testing, the refresh token expires after 7 days. Re-run
+   `python authorize.py`. `gmail.modify` is a restricted scope, so leaving
+   Testing requires full verification — there is no way around it.
 
 ---
 
-## 八、状态文件
+## 8. State files
 
-全部在 `the_super/fixtures/`,全部已 gitignore:
+All in `the_super/fixtures/`, all gitignored:
 
-| 文件 | 内容 | 能删吗 |
+| File | Contents | Safe to delete? |
 |---|---|---|
-| `tenants.json` | 租客名册(含真实号码) | ❌ 删了系统不认人 |
-| `paypal_transactions.json` | mock 账本 | 可用 `python -m the_super.fixtures_gen <月份>` 重新生成 |
-| `history_cursor.json` | 处理过的 message id | ✅ 删掉可重放消息 |
-| `ledger.json` | 付款台账 | ✅ 删掉重置 |
-| `tickets.json` | 维修工单 | ✅ 删掉重置 |
-| `threads.json` | 各租客的 Voice 邮件线程 | ⚠️ 删了就发不出催缴 |
+| `tenants.json` | Tenant roster (contains a real number) | ❌ without it the system can't identify anyone |
+| `paypal_transactions.json` | Mock ledger | Regenerate with `python -m the_super.fixtures_gen <month>` |
+| `history_cursor.json` | Processed message ids | ✅ delete to replay messages |
+| `ledger.json` | Payment ledger | ✅ delete to reset |
+| `tickets.json` | Maintenance tickets | ✅ delete to reset |
+| `threads.json` | Each tenant's Voice email thread | ⚠️ delete it and collection texts can't be sent |
 
-录 demo 前重置:
+Reset before recording the demo:
 
 ```bash
 rm -f the_super/fixtures/{tickets,ledger,history_cursor}.json

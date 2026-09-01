@@ -1,12 +1,15 @@
-"""录 demo 用的场景播放器 —— 不属于应用,只是个演示入口。
+"""Scenario player for recording the demo — not part of the application, just a
+demo entry point.
 
-    python demo.py list                  列出所有场景
-    python demo.py pay-ok                跑单个消息场景
-    python demo.py rent 2026-08-02       模拟某天跑房租周期
-    python demo.py all                   依次跑完所有消息场景
+    python demo.py list                  list every scenario
+    python demo.py pay-ok                run one message scenario
+    python demo.py rent 2026-08-02       simulate the rent cycle on a given day
+    python demo.py all                   run every message scenario in order
 
-消息场景一律用**假号码假邮箱**构造,不碰真实名册,录屏不会泄露 PII。
-日期靠参数注入(check_rent 的 today 是参数),不用改系统时间。
+Message scenarios are always built with **fake numbers and fake emails**; they
+never touch the real roster, so a screen recording leaks no PII.
+Dates are injected as parameters (today is a parameter of check_rent), so there
+is no need to change the system clock.
 """
 
 import asyncio
@@ -25,39 +28,40 @@ from the_super.agent import root_agent                  # noqa: E402
 from the_super.rent import build_collection_sms, check_rent  # noqa: E402
 from the_super.schemas import IncomingMessage           # noqa: E402
 
-# room_id 用名册里的房间,但 sender/email 用假值 —— 演示不需要真号码
+# room_id uses a real room from the roster, but sender/email are fake — the demo
+# does not need real contact details
 SCENARIOS = {
-    "pay-ok": ("💰 付款 · 说明了月份 + 金额相符 → 起草回执",
+    "pay-ok": ("💰 Payment - month stated + amount matches -> draft the receipt",
                "1F-A", "Hi, I just sent $1000 for September rent via PayPal."),
-    "pay-nomonth": ("❓ 付款 · 没说是哪个月 → 自动发短信确认,不出回执",
+    "pay-nomonth": ("❓ Payment - no month stated -> auto-send a confirming text, no receipt",
                     "1F-A", "Hi, I just sent you the rent via PayPal."),
-    "pay-short": ("💰 付款 · 少付 → 不回执,转人工",
+    "pay-short": ("💰 Payment - underpaid -> no receipt, escalate to a human",
                   "1F-B", "Just PayPal'd you $600 for September rent. Money is "
                           "tight this month, I'll send the rest next week."),
-    "pay-none": ("💰 付款 · 账本查无记录 → 转人工",
+    "pay-none": ("💰 Payment - nothing found in the ledger -> escalate to a human",
                  "2F-A", "I sent September rent yesterday, should be there by now."),
-    "pay-vague": ("🤔 含糊 · 低置信度 → 安全阀转人工",
+    "pay-vague": ("🤔 Vague - low confidence -> safety valve, escalate to a human",
                   "2F-B", "Hey, can we talk about the money stuff sometime?"),
-    "legal": ("⚖️ 涉及法律 → 缓冲回复,不表态",
+    "legal": ("⚖️ Legal matter -> holding reply, no position taken",
               "2F-A", "My lawyer says the security deposit should have been "
                       "returned within 14 days. I want it back this week."),
-    "lease": ("📄 涉及租约 → 缓冲回复,交给房东",
+    "lease": ("📄 Lease matter -> holding reply, hand to the landlord",
               "2F-B", "I'm thinking about moving out early. What happens to "
                       "my deposit if I break the lease?"),
-    "fix-vague": ("🔧 报修 · 描述不清 → 索要照片",
+    "fix-vague": ("🔧 Repair - description unclear -> ask for photos",
                   "3F-A", "The toilet is leaking."),
-    "fix-clear": ("🔧 报修 · 描述清楚 → 生成派单简报",
+    "fix-clear": ("🔧 Repair - description clear -> produce the dispatch brief",
                   "3F-A", "Water is seeping from the seam where the toilet base "
                           "meets the bathroom floor. Started last night, there's "
                           "a small puddle on the floor now."),
-    "fix-urgent": ("🔧 报修 · 紧急 → urgent 定级",
+    "fix-urgent": ("🔧 Repair - emergency -> urgent severity",
                    "1F-A", "The kitchen pipe burst, water is spraying everywhere. "
                            "I shut off the main valve."),
 }
 
 
 def make_message(room_id: str, body: str) -> IncomingMessage:
-    """构造一条进来的短信。sender/email 全是假的。"""
+    """Build one incoming text. sender/email are entirely fake."""
     idx = "ABCDE"[["1F-A", "1F-B", "2F-A", "2F-B", "3F-A"].index(room_id)]
     return IncomingMessage(
         source="sms",
@@ -74,7 +78,7 @@ def make_message(room_id: str, body: str) -> IncomingMessage:
 async def run_message(key: str) -> None:
     title, room_id, body = SCENARIOS[key]
     print(f"\n{'='*66}\n{title}\n{'='*66}")
-    print(f"📱 {room_id} 发来短信:\n   「{body}」\n")
+    print(f"📱 Text from {room_id}:\n   \u201c{body}\u201d\n")
     print("─" * 66)
 
     msg = make_message(room_id, body)
@@ -95,26 +99,26 @@ async def run_message(key: str) -> None:
 def run_rent(day: str) -> None:
     today = date.fromisoformat(day)
     month = f"{today:%Y-%m}"
-    print(f"\n{'='*66}\n📅 如果今天是 {today}(每户按自己合同的应付日)\n{'='*66}")
+    print(f"\n{'='*66}\n📅 If today were {today} (each unit on its own lease due day)\n{'='*66}")
     for s in check_rent(month, today):
-        mark = "🔔 触发催缴" if s.needs_collection else ""
-        print(f"  {s.room_id} {s.tenant_name:9} 应付 {s.due_date}  "
-              f"逾期 {s.days_overdue:>2} 天  "
-              f"收到 ${s.found_amount:>7.2f}/{s.expected_amount:.0f}  "
+        mark = "🔔 collection triggered" if s.needs_collection else ""
+        print(f"  {s.room_id} {s.tenant_name:9} due {s.due_date}  "
+              f"{s.days_overdue:>2} day(s) late  "
+              f"received ${s.found_amount:>7.2f}/{s.expected_amount:.0f}  "
               f"{s.status:<17}{mark}")
     pending = [s for s in check_rent(month, today) if s.needs_collection]
     if pending:
-        print(f"\n──── 发给 {pending[0].room_id} 的催缴短信 ────")
+        print(f"\n──── collection text for {pending[0].room_id} ────")
         print(build_collection_sms(pending[0]))
 
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "list"
     if cmd == "list":
-        print("消息场景:")
+        print("Message scenarios:")
         for k, (t, r, b) in SCENARIOS.items():
             print(f"  {k:12} {t}")
-        print("\n房租时间线:  python demo.py rent 2026-08-02")
+        print("\nRent timeline:  python demo.py rent 2026-08-02")
     elif cmd == "rent":
         run_rent(sys.argv[2] if len(sys.argv) > 2 else str(date.today()))
     elif cmd == "all":

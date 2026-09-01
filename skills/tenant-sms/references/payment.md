@@ -1,150 +1,255 @@
-# 付款相关短信
+# Payment-related SMS
 
-## 场景 A · 金额相符,月份明确 → 回执
+**Before you reply, the system has always already checked PayPal**
+(`verify_payment`, which completes immediately). So every payment reply must
+convey the check and its result — "we've checked our PayPal account and ..." —
+rather than a vague acknowledgement. Precision beats brevity.
 
-租客说了是哪个月、金额和该租客的 rent_amount 一致、账本里查得到。
+## Scenario A · Amount matches, month stated → receipt
 
-**这是唯一会生成回执的情况。** 而且回执只存草稿,房东点发送才真的发出去。
+The tenant named the month, the amount equals that tenant's `rent_amount`, and
+the deposit **was found** in PayPal (status=verified).
 
-> Hi Sarah, we have received your payment notice for October rent of $1,000.
-> Thanks for letting us know.
+**This is the only case that generates a receipt.** And the receipt is saved as a
+draft — it goes out only when the landlord hits send.
 
-要点:
-- "payment notice" 是必须的词。不是 "payment"、不是 "rent"
-- 月份写全称(October),不写 2026-10 —— 那是给系统看的
-- 金额带千位逗号
-- 不加 "your account is now current" 之类的结论
+> Hi Sarah, thanks for letting us know. We've checked our PayPal account
+> and see your $1,000 payment received on October 1. We've noted it toward
+> October rent. If anything here doesn't look right, let us know.
 
-## 场景 B · 没说是哪个月 → 先验证,再问
+Key points:
+- **State the check** ("we've checked our PayPal account") — the evidentiary
+  value of this receipt is that it records what was reconciled and when
+- Amount from `found_amount`, date from `found_date`; invent no number. If the
+  input has no date, write no date — don't guess
+- Say "noted it toward October rent", **not** "your October rent is settled" /
+  "your account is current" — you are asserting this transaction, not a
+  settled-in-full state
+- Spell the month out (October), not 2026-10 — that form is for the system
+- Use a thousands separator in amounts
 
-### 第一分叉不是月份,是「这笔钱查到了吗」
+## Scenario B · Month not stated → verify first, then ask
 
-租客说 "I just sent $1,000" —— 这是一个**关于最近几天有一笔入账的具体声称**。
-系统已经替你查过了:
+### The first fork is not the month, it's «did we find the money»
 
-| 字段 | 含义 |
+The tenant says "I just sent $1,000" — that is a **specific claim that a deposit
+landed in the last few days**. The system has already checked it for you:
+
+| Field | Meaning |
 |---|---|
-| `has_recent_match` | **最近几天有没有查到金额吻合的入账** ← 先看这个 |
-| `recent_matches[]` | 查到的话,每笔的 `amount` / `date` / `days_ago` |
-| `claimed_amount` | 租客说他转了多少 |
-| `expected_amount` | 该租客的月租 |
-| `amount_matches_rent` | 声称金额是否正好等于一个月租金 |
-| `unsettled_months` | 尚未结清的月份 —— **内部信息,不许说出去** |
+| `has_recent_match` | **Was a matching deposit found in the last few days** ← look here first |
+| `recent_matches[]` | If found, each one's `amount` / `date` / `days_ago` |
+| `claimed_amount` | How much the tenant says they sent |
+| `expected_amount` | That tenant's monthly rent |
+| `amount_matches_rent` | Whether the claimed amount equals exactly one month's rent |
+| `unsettled_months` | Months not yet settled — before verification say **not a word**; after verification mention only the one this payment applies to |
 
-**先按 `has_recent_match` 分叉,再考虑月份。**
-钱都没查到就讨论"这是哪个月的",等于默认接受了租客的说法。
+**Fork on `has_recent_match` first, and only then consider the month.**
+Discussing "which month is this for" before the money is found amounts to
+accepting the tenant's account by default.
 
 ---
 
-### B-A · `has_recent_match = true` → 陈述归属,不要开放式提问
+### B-A · `has_recent_match = true` → state how it applies; don't ask an open question
 
-钱验证到账了。**这笔的欺诈风险已经消除**,剩下的只是记账归属 ——
-而归属已经由代码用确定性规则算好了(`suggested_month` / `suggested_reason`)。
+The money is verified. **The fraud risk on this one is gone**; what remains is
+where it books — and that has already been computed by deterministic code
+(`suggested_month` / `suggested_reason`).
 
-你的任务是**把结论说清楚**,不是再问租客一遍。
+Your job is to **state the conclusion clearly**, not to ask the tenant again.
 
-**B-A1 · `suggestion_is_certain = true` → 陈述 + 留口子**
+**B-A1 · `suggestion_is_certain = true` → state it + leave room**
 
-> Hi Sarah, thanks — we have your $1,000 from August 30. Since August rent
-> is already settled, we'll apply this to September, which is due tomorrow.
-> Let us know if you meant a different month.
+> Hi Sarah, thanks for letting us know. We've checked our PayPal account
+> and see your $1,000 received on August 30. Since August rent is already
+> settled, we'll apply this to September, which is due tomorrow. Let us
+> know if you meant a different month.
 
-四个要件缺一不可:
-1. **那笔钱的金额和日期** —— 让租客确认是不是这一笔
-2. **归属结论** —— "we'll apply this to September"
-3. **理由** —— 用 `suggested_reason`,让租客能自己核对逻辑
-4. **纠正的口子** —— "let us know if..."
+Five required elements, none optional:
+1. **The check** — "we've checked our PayPal account", which gives the reply
+   factual weight
+2. **That payment's amount and date** — so the tenant can confirm it's the same one
+3. **The conclusion** — "we'll apply this to September"
+4. **The reason** — from `suggested_reason`, so the tenant can check the logic
+5. **Room to correct** — "let us know if..."
 
-如果租客用了 "this month" / "next month" 这类相对说法,**要直接点破歧义**,
-因为那正是问题所在:
+When `suggested_reason` points at an **unpaid earlier month**, say so just as
+directly. After verification, the month status directly tied to this payment is
+fair to state:
+
+> Hi Sarah, thanks — we've checked PayPal and see your $1,000 received
+> today. Our records show August rent is still open, so we'll apply this
+> to August. Let us know if you meant a different month.
+
+If the tenant used a relative phrase like "this month" / "next month",
+**name the ambiguity directly** — that is precisely the problem:
 
 > You mentioned "this month" — since rent is due in advance, we're reading
 > that as September. Let us know if you meant August.
 
-**B-A2 · `suggestion_is_certain = false` → 列出具体候选让租客选**
+**B-A2 · `suggestion_is_certain = false` → list the specific candidates**
 
-有多个已到期的欠款月时,归属会影响各月的逾期天数和后续能不能走法定程序,
-这个必须由租客决定:
+When several due months are unpaid, the choice affects each month's days-overdue
+count and whether the statutory track later applies, so the tenant must decide:
 
-> Hi Sarah, thanks — we have your $1,000 from August 30. We show both July
-> and August still open. Which should this go toward?
+> Hi Sarah, thanks for letting us know. We've checked our PayPal account
+> and see your $1,000 received on August 30. We show both July and August
+> still open — which should this go toward?
 
-要点:**列出具体月份**,不要问"哪个月"。租客不该替我们回忆账目。
+Key point: **name the months**. Don't ask "which month" — the tenant shouldn't
+have to reconstruct our books.
 
-### B-B · `has_recent_match = false` → 说不出"收到了",要凭据
+### B-B · `has_recent_match = false` → you cannot say "received"; ask for evidence
 
-**这是防虚报的关键分支。** 查不到就是查不到。
+**This is the branch that stops false payment claims.** Not found is not found.
 
-> Hi Sarah, thanks for letting us know. We don't see a $1,000 payment on
-> our end yet. PayPal eChecks can take up to 3 business days to clear —
-> could you send the confirmation number, the date you sent it, and the
-> email you paid from? We'll re-check.
+> Hi Sarah, thanks for letting us know. We've checked our PayPal account
+> and don't see a $1,000 payment yet. PayPal eChecks can take up to 3
+> business days to clear — could you send the confirmation number, the date
+> you sent it, and the email you paid from? We'll re-check.
 
-要点:
-- **绝不**说任何暗示"我们这边没问题"的话
-- **绝不**说出哪个月已结清、哪个月没结清 —— 那正是虚报者需要的信息
-- `yet` 这个词承载全部谨慎:我们只是**还没看到**,不是断定他没付
-- 要三样具体东西:confirmation number、日期、付款邮箱。
-  这三样能真正解决问题,而且**诚实的租客给得出,虚报的给不出**
-- 不问"是哪个月的" —— 钱还没确认存在,讨论归属为时过早
-
----
-
-### B-C · 金额和月租对不上(`amount_matches_rent = false`)
-
-先按 B-A / B-B 处理"查没查到",再把金额差异一起问:
-
-> Hi Sarah, thanks for letting us know. Just so we log this correctly —
-> you mentioned $600, and the monthly rent is $1,000. Which month is this
-> toward, and is the rest coming separately?
-
-要点:金额异常时不能只问月份。但保持中性,不写成质问。
+Key points:
+- **Never** say anything implying "we're all good on our side"
+- **Never** reveal which months are settled and which aren't — that is exactly
+  what someone making a false claim needs
+- The word `yet` carries all the caution: we simply **haven't seen it**, we are
+  not asserting they didn't pay
+- Ask for three concrete things: confirmation number, date, paying email.
+  Those actually resolve the case, and **an honest tenant can produce them while
+  a false claim cannot**
+- Don't ask "which month" — the money isn't confirmed to exist, so allocation is
+  premature
 
 ---
 
-### 通用要点
+### B-C · Amount doesn't match the rent (`amount_matches_rent = false`)
 
-- **不要**在任何一条里说"我们收到了你的房租",除非 `has_recent_match=true`
-  且你说的正是那一笔
-- 推断必须软化:`should we apply it to` / `is that right`。
-  **不能**写成 "this is for September" —— 那是替租客做决定
-- 解释一句为什么问("so we log it to the right month"),否则像在为难对方
-- **永远不要说出 `unsettled_months` 的内容。** 那是内部账目状态
+Handle "found or not" per B-A / B-B first, then fold in the amount discrepancy:
 
-## 场景 C · 金额少于应付
+> Hi Sarah, thanks for letting us know. We've checked our PayPal account
+> and see $600 received on August 30. The monthly rent is $1,000 — which
+> month is this toward, and is the rest coming separately?
 
-**不生成回执,转人工。** 但如果房东要发,措辞:
+When `has_recent_match=false`, don't say what was found — only that the amount
+doesn't match, and ask for evidence:
 
-> Hi Sarah, we received your notice for $600 toward October rent.
-> The full amount due is $1,000, so there's $400 remaining.
-> Let us know if you've already sent the rest.
+> Hi Sarah, thanks for letting us know. We've checked our PayPal account
+> and don't see a $600 payment yet — and the monthly rent is $1,000.
+> Could you send the confirmation number and the date you sent it?
 
-要点:
-- 三个数字都要出现:收到的、应付的、差额。不要让租客自己算
-- **不要**写 "no problem" / "that's fine" / "whenever you can" ——
-  agent 没有权限减免或延期
-- 最后一句留余地,可能第二笔在路上
+Key point: when the amount is off, don't ask about the month alone. Stay neutral;
+don't make it read as an interrogation.
 
-## 场景 D · 金额多于应付
+---
 
-> Hi Sarah, we received your notice for $1,200 toward October rent,
-> which is $200 more than the $1,000 due. Could you confirm whether the
-> extra is intended for next month or something else?
+### General points
 
-要点:多付比少付更需要问清楚 —— 可能是提前付了下月、可能是还押金、
-可能是转错了。不要擅自假设。
+- **Never** write "we received your rent" in any of these unless
+  `has_recent_match=true` and you are describing that exact payment
+- Soften inferences: `should we apply it to` / `is that right`.
+  **Don't** write "this is for September" — that decides for the tenant
+- Give one line of reason for asking ("so we log it to the right month"),
+  otherwise it reads as making things difficult
+- **Disclosure of `unsettled_months` follows verification**: before verification,
+  not one month is mentioned; after verification, mention only the month covered
+  by `suggested_reason` that this payment applies to. Never enumerate the ledger
 
-## 场景 E · 账本里查无记录
+## Scenario C · Amount less than due
 
-**永远不要说 "we didn't receive it" 或 "your payment failed"。**
-我们只是查不到,可能在途、可能付到别的邮箱、可能我们的查询有问题。
+**No receipt is generated; escalate to a human.** If the landlord does want to
+send something, the wording is:
 
-> Hi Sarah, thanks for letting us know. We don't see the payment on our
-> end yet. PayPal eChecks can take up to 3 business days to clear —
-> could you send the confirmation number and the email you paid from?
-> We'll re-check.
+> Hi Sarah, thanks for letting us know. We've checked our PayPal account
+> and see $600 received toward October rent. The full amount due is $1,000,
+> so there's $400 remaining. Let us know if you've already sent the rest.
 
-要点:
-- "we don't see it **yet**" —— yet 这个词承载了全部的谨慎
-- 主动给出两个可能原因(eCheck 在途、付款邮箱不同),不把责任推给租客
-- 要具体信息(confirmation number、付款邮箱),这两样能真正解决问题
+Key points:
+- All three numbers must appear: received, due, and the gap. Don't make the
+  tenant do the arithmetic
+- **Don't** write "no problem" / "that's fine" / "whenever you can" — the agent
+  has no authority to waive or defer
+- **Don't** write anything implying the month is «taken care of»:
+  "that takes care of October" / "you're good for now" / "we'll call it even".
+  In most states **accepting a partial payment can waive the right to evict for
+  that month** unless the right to collect the balance is expressly reserved.
+  A single "that's fine" in a text can become that evidence. The wording must
+  stop at the fact that $400 remains
+- Close with room for the possibility that a second payment is already on its way
+
+## Scenario D · Amount more than due
+
+> Hi Sarah, thanks for letting us know. We've checked our PayPal account
+> and see $1,200 received toward October rent — $200 more than the $1,000
+> due. Could you confirm whether the extra is intended for next month or
+> something else?
+
+Key point: an overpayment needs clarifying more than an underpayment does — it
+could be a prepayment of next month, a deposit repayment, or a mistake. Never
+assume on the tenant's behalf.
+
+## Scenario E · No record found in the ledger
+
+**Never say "we didn't receive it" or "your payment failed".**
+We merely can't find it: it may be in transit, paid from a different email, or
+our lookup may be at fault.
+
+> Hi Sarah, thanks for letting us know. We've checked our PayPal account
+> and don't see the payment yet. PayPal eChecks can take up to 3 business
+> days to clear — could you send the confirmation number and the email you
+> paid from? We'll re-check.
+
+Key points:
+- "we don't see it **yet**" — the word *yet* carries all the caution
+- Offer two possible reasons yourself (eCheck in transit, a different paying
+  email) rather than putting the fault on the tenant
+- Ask for specifics (confirmation number, paying email) — those two actually
+  resolve it
+
+## Scenario F · The tenant **named a month**, but an earlier month is still unpaid
+
+`month_stated=true` (the tenant explicitly said "for October rent") while
+`unsettled_months` still contains an earlier month. **This is the easiest one to
+get wrong.**
+
+### Rule: the tenant's designation wins; the system may not reallocate on its own
+
+The common-law hierarchy for applying payments is **debtor designates >
+creditor chooses > oldest-first default**. When the tenant specified the
+allocation as they paid, that designation binds us — we **may not** quietly
+apply the money to the August arrears, however much more "sensible" that is as
+accounting practice.
+
+The system's oldest-arrears-first rule behind `suggested_month` applies
+**only when the tenant did not designate**.
+
+### Wording: send the receipt, handle arrears separately — **not in the same text**
+
+> Hi Sarah, thanks for letting us know. We've checked our PayPal account
+> and see your $1,000 payment received on October 1. We've noted it toward
+> October rent, as you indicated. If anything here doesn't look right,
+> let us know.
+
+Key points:
+- **"as you indicated"** — this records that the allocation was **the tenant's
+  own designation**. If the books are ever disputed, that phrase shows we did
+  not reallocate it ourselves
+- This text does **not** mention the August arrears, for two reasons:
+  1. Combining them reads as bargaining with a receipt
+  2. Collections has its own wording standard and timeline
+     (`references/collections.md`), driven by the deterministic templates in
+     `rent.py`. The receipt node should not drag it in
+- Earlier arrears go out as a **separate collection text**, when it is due to be sent
+
+### The one exception: the month the tenant named is **already settled**
+
+Here the move isn't "respect the designation" but ask — the money is real, but
+the allocation doesn't add up:
+
+> Hi Sarah, thanks for letting us know. We've checked our PayPal account
+> and see your $1,000 received on October 1. Our records show October rent
+> is already covered — should we apply this to a different month, or is
+> this a prepayment for November?
+
+Key point: the money is verified, so October's status may be stated (it bears
+directly on where this payment lands). But **don't** spill the arrears status of
+other months along with it.

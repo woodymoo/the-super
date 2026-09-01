@@ -1,9 +1,10 @@
-"""持久化层 —— 台账和工单。
+"""Persistence layer — the ledger and the tickets.
 
-本地开发用 JSON 文件,上 Cloud Run 换 Firestore。
-Cloud Run 容器随时会被回收,内存态一定丢,所以状态必须外置。
+Local development uses JSON files; on Cloud Run this becomes Firestore.
+A Cloud Run container can be reclaimed at any time and in-memory state is always
+lost, so state has to live outside the process.
 
-切换只改 USE_LOCAL 一个开关。
+Switching between them is the single USE_LOCAL flag.
 """
 
 import json
@@ -16,7 +17,7 @@ DATA_DIR = Path(__file__).parent.parent / "fixtures"
 LEDGER_FILE = DATA_DIR / "ledger.json"
 TICKETS_FILE = DATA_DIR / "tickets.json"
 
-MEDIA_WAIT_HOURS = 48   # 超过这个时间还没收到照片就提醒
+MEDIA_WAIT_HOURS = 48   # remind if photos still haven't arrived after this long
 
 
 def _load(path: Path, default: dict) -> dict:
@@ -32,17 +33,18 @@ def _save(path: Path, data: dict) -> None:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-# ---------------------------------------------------------------- 台账
+# ---------------------------------------------------------------- Ledger
 
 def write_ledger(month: str, room_id: str, claimed_amount: float,
                  found_amount: float | None, status: str,
                  txn_id: str | None = None) -> None:
-    """记一笔付款。
+    """Record a payment.
 
     status: claimed | confirmed | disputed | missing
 
-    注意 claimed 和 confirmed 是两个状态。租客说付了不等于房东确认了 ——
-    这个区分在租务纠纷里可能很重要,不要合并。
+    Note that claimed and confirmed are two distinct states. A tenant saying they
+    paid is not the landlord confirming it — that distinction can matter a great
+    deal in a tenancy dispute, so do not merge them.
     """
     ledger = _load(LEDGER_FILE, {})
     ledger.setdefault(month, {})[room_id] = {
@@ -60,22 +62,23 @@ def get_ledger(month: str) -> dict:
 
 
 def get_unpaid_rooms(month: str, all_rooms: list[str]) -> list[str]:
-    """房租周期用:这个月还没有付款声明的房间。"""
-    # 白名单而非黑名单:只有明确结清的状态才算"不用催"。
-    # 原先写成 `status == "missing"` 才算未付,导致 disputed(纠纷中,
-    # 最该跟进的那些)静默掉出催缴队列。
+    """For the rent cycle: rooms with no payment claim yet this month."""
+    # An allowlist rather than a denylist: only an explicitly settled status
+    # counts as "no collection needed". This used to treat only
+    # `status == "missing"` as unpaid, which silently dropped disputed rooms —
+    # exactly the ones most in need of follow-up — out of the collection queue.
     settled = {"claimed", "confirmed"}
     paid = get_ledger(month)
     return [r for r in all_rooms
             if r not in paid or paid[r].get("status") not in settled]
 
 
-# ---------------------------------------------------------------- 工单
+# ---------------------------------------------------------------- Tickets
 
 def write_ticket(status: str, room_id: str | None = None,
                  draft: dict | None = None, draft_sms: str | None = None,
                  ticket_id: str | None = None, **fields) -> str:
-    """新建或更新工单,返回 ticket_id。
+    """Create or update a ticket, returning the ticket_id.
 
     status: open | awaiting_media | ready_to_dispatch | dispatched | closed
     """
@@ -105,10 +108,10 @@ def write_ticket(status: str, room_id: str | None = None,
 
 
 def get_ticket_history(room_id: str, limit: int = 10) -> list[dict]:
-    """这个房间的历史工单 —— 用来识别重复问题。
+    """This room's prior tickets — used to spot repeat problems.
 
-    同一个部位反复出问题,是和第一次完全不同的情况,
-    简报里必须让房东看到。
+    The same spot failing repeatedly is a completely different situation from the
+    first occurrence, and the brief has to put that in front of the landlord.
     """
     tickets = _load(TICKETS_FILE, {})
     matched = [t for t in tickets.values() if t.get("room_id") == room_id]
@@ -117,11 +120,11 @@ def get_ticket_history(room_id: str, limit: int = 10) -> list[dict]:
 
 
 def get_overdue_media_tickets() -> list[dict]:
-    """超时仍未收到照片的工单 —— 日报里提醒房东。
+    """Tickets still waiting on photos past the deadline — surfaced in the daily digest.
 
-    这就是"等待"的正确实现方式:状态存在这里,
-    由 Cloud Scheduler 下一轮唤醒时检查,
-    而不是让 agent 在内部循环等待(那会让容器常驻烧钱)。
+    This is the correct way to implement "waiting": the state lives here and is
+    checked when Cloud Scheduler wakes the next round, rather than having the
+    agent loop and wait internally (which keeps a container alive and burns money).
     """
     now = datetime.now(timezone.utc).isoformat()
     tickets = _load(TICKETS_FILE, {})
@@ -130,16 +133,18 @@ def get_overdue_media_tickets() -> list[dict]:
             and t.get("media_deadline", "") < now]
 
 
-# ---------------------------------------------------------------- 出站线程登记
+# --------------------------------------------------------- Outbound thread registry
 
 THREADS_FILE = DATA_DIR / "threads.json"
 
 
 def remember_thread(room_id: str, gmail_thread_id: str) -> None:
-    """记住某租客最近一次的 Voice 邮件线程。
+    """Remember a tenant's most recent Voice email thread.
 
-    Voice 只能"回复已有线程"来发短信,没有"主动给某号码发"的接口。
-    催缴是定时触发的,手上没有来信可回 —— 所以收信时就要把线程存下来。
+    Voice can only send a text by replying to an existing thread; it has no
+    interface for texting a number out of the blue. Collection runs on a
+    schedule with no incoming message to reply to, so the thread has to be
+    recorded when mail arrives.
     """
     d = _load(THREADS_FILE, {})
     d[room_id] = {"thread_id": gmail_thread_id,

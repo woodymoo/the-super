@@ -1,27 +1,30 @@
-# The Super — 项目说明
+# The Super — Project Guide
 
-自主房产管理 agent。Devpost "All Things Agentic Hackathon",Taskmaster 赛道。
-**截止:2026-08-31 17:00 PDT。**
+An autonomous property management agent. Devpost "All Things Agentic Hackathon",
+Taskmaster track. **Deadline: 2026-08-31 17:00 PDT.**
 
-完整设计见 `docs/design.md`,提交说明草稿见 `docs/submission.md`。
-动手前先读 `docs/design.md`。
+Full design in `docs/design.md`; draft submission notes in `docs/submission.md`.
+Read `docs/design.md` before touching anything.
 
 ---
 
-## ⚠️ 必须使用 ADK 2.0,不要写 1.x 代码
+## ⚠️ Use ADK 2.0 — do not write 1.x code
 
-这是最容易出错的地方。ADK Python 2.0 于 2026-05-19 GA,引入了图执行引擎。
-网上和训练数据里绝大多数 ADK 示例是 1.x 时代的,**不要照搬**。
+This is the easiest thing to get wrong. ADK Python 2.0 went GA on 2026-05-19 and
+introduced the graph execution engine. The overwhelming majority of ADK examples
+online and in training data are from the 1.x era — **do not copy them**.
 
-**禁止使用(1.x 写法):**
+**Forbidden (1.x style):**
 
-- `SequentialAgent` / `ParallelAgent` / `LoopAgent` — 已被 graph workflow 取代
-- `output_key="foo"` + 下游 instruction 里的 `{foo}` 模板 — 2.0 靠节点返回值自动传递
-- 手动 `session.state[...]` 传递节点间数据
-- `context.session.events.append(...)` 直接追加事件
-- 覆写 `_run_async_impl()` 或 `generate_content()` — 图引擎会静默忽略
+- `SequentialAgent` / `ParallelAgent` / `LoopAgent` — replaced by graph workflows
+- `output_key="foo"` plus `{foo}` templating in a downstream instruction — 2.0
+  passes data automatically via node return values
+- Passing data between nodes by hand through `session.state[...]`
+- Appending events directly with `context.session.events.append(...)`
+- Overriding `_run_async_impl()` or `generate_content()` — the graph engine
+  silently ignores them
 
-**应当使用(2.0 写法):**
+**Correct (2.0 style):**
 
 ```python
 from google.adk import Agent, Event, Workflow
@@ -34,7 +37,7 @@ step_a = Agent(name="a", model="gemini-flash-latest",
                instruction="...", output_schema=MySchema)
 
 def pure_code_node(node_input: MySchema) -> OtherSchema:
-    """纯代码节点,不调模型。"""
+    """A pure-code node; it does not call the model."""
     return OtherSchema(...)
 
 def router(node_input: OtherSchema):
@@ -49,42 +52,49 @@ root_agent = Workflow(
 )
 ```
 
-要点:
-- 节点之间靠**返回值**传数据,pydantic schema 是类型契约,不写 session state
-- 节点可以是 Agent、普通函数、Tool,或另一个 Workflow
-- 路由函数返回 `Event(route=...)`,下一行 edges 用 dict 分派
+Key points:
+- Nodes pass data via **return values**; pydantic schemas are the type contract.
+  Nothing goes through session state
+- A node can be an Agent, a plain function, a Tool, or another Workflow
+- A routing function returns `Event(route=...)`, and the next line of `edges`
+  dispatches with a dict
 
-`payment.py` 是已验证可用的参考实现,新代码照它的风格写。
+`payment.py` is the verified reference implementation; write new code in its style.
 
-不确定 API 时用 WebFetch 查 https://adk.dev/graphs/ 和 https://adk.dev/graphs/routes/,
-不要凭记忆写。
+When unsure about the API, check https://adk.dev/graphs/ and
+https://adk.dev/graphs/routes/ with WebFetch rather than writing from memory.
 
-## ⚠️ 工具里不要写宽泛的 except
+## ⚠️ No broad excepts in tools
 
-ADK 2.0 有框架级自动重试。工具里留 `except Exception:` 会把失败对框架屏蔽,
-**永久禁用该步骤的重试**。绝不 catch `BaseException`(会吞掉 `NodeInterruptedError`,
-破坏人工介入暂停)。
+ADK 2.0 has framework-level automatic retry. Leaving `except Exception:` in a
+tool hides the failure from the framework and **permanently disables retry for
+that step**. Never catch `BaseException` — that swallows `NodeInterruptedError`
+and breaks human-in-the-loop pauses.
 
-- 业务语义错误(未知租客、金额格式不对)→ 返回结构化 error 结果给模型
-- 基础设施故障(网络、IMAP、Firestore 超时)→ **让它抛出去**,框架会重试
+- Business/semantic errors (unknown tenant, malformed amount) → return a
+  structured error result to the model
+- Infrastructure failures (network, IMAP, Firestore timeout) → **let them
+  propagate**; the framework will retry
 
 ---
 
-## ⚠️ Optional 字段必须给默认值
+## ⚠️ Optional fields must have defaults
 
-这个坑咬过两次。ADK 序列化节点输出时会剥掉 `None`,再校验就报
-`Field required` —— 因为 `X | None` 不带默认值在 pydantic 里**仍然是必填**。
+This one has bitten twice. When ADK serializes a node's output it strips `None`,
+and re-validation then fails with `Field required` — because in pydantic
+`X | None` without a default is **still required**.
 
 ```python
-repeat_of: str | None            # ❌ 模型不返回这个字段 -> 整条分支崩
+repeat_of: str | None            # ❌ the model doesn't return this field -> the whole branch crashes
 repeat_of: str | None = None     # ✅
 ```
 
-尤其危险的是那些"正常情况下就是 None"的字段
-(`found_amount` 在查无记录时、`cure_deadline` 在不催缴时)——
-它们会让 happy path 之外的分支必崩,而且只在跑到那条分支时才暴露。
+The dangerous ones are the fields that are **None in the normal case**
+(`found_amount` when nothing is found, `cure_deadline` when no collection is
+due). They guarantee a crash on every branch except the happy path, and only
+surface once that branch actually runs.
 
-新增 pydantic 模型后扫一遍:
+After adding a pydantic model, sweep for them:
 
 ```bash
 python -c "
@@ -101,110 +111,139 @@ for mod in ['the_super.schemas','the_super.payment','the_super.maintenance','the
 
 ---
 
-## 措辞归 Skill,判定归代码
+## Wording belongs to the Skill; decisions belong to the code
 
-对租客说话的措辞规范全部外置在 `skills/tenant-sms/`(ADK 2.0 Skills,
-`SKILL.md` + `references/*.md`,按需加载)。改 markdown 就能改 agent 怎么说话。
+Every wording standard for talking to tenants lives outside the code in
+`skills/tenant-sms/` (ADK 2.0 Skills: `SKILL.md` + `references/*.md`, loaded on
+demand). Editing the markdown changes how the agent speaks.
 
-**但只有"怎么说"归 Skill。** 下面这些永远是确定性代码:
+**But only "how to say it" belongs to the Skill.** The following are always
+deterministic code:
 
-| 归代码 | 在哪 |
+| Belongs to code | Where |
 |---|---|
-| 金额相不相符 | `payment.verify_payment` |
-| 月份说没说清 | `payment.month_router` |
-| 能不能自动发回执 | `payment.verification_router` |
-| 逾期几天该催缴 | `rent.check_one` |
-| 什么可以自动发给租客 | 各节点的 `send_sms_now` / `draft_sms_reply` 调用点 |
+| Whether an amount matches | `payment.verify_payment` |
+| Whether the month was stated clearly | `payment.month_router` |
+| Whether a receipt may be sent automatically | `payment.verification_router` |
+| How many days overdue triggers collection | `rent.check_one` |
+| What may be sent to a tenant automatically | The `send_sms_now` / `draft_sms_reply` call sites in each node |
 
-在 SKILL.md 里写"金额差一点也可以放行"是没用的 —— 路由根本不读它。
-这是有意的:prompt 的行为会随模型版本漂移,而且无法写测试证明它每次都对。
+Writing "a small amount difference is acceptable" in SKILL.md does nothing — the
+router never reads it. That is deliberate: prompt-driven behavior drifts across
+model versions, and you cannot write a test proving it is right every time.
 
-新增措辞规则 → 写进 `skills/tenant-sms/references/`,不要塞进 instruction。
-instruction 里只留"去读哪个 reference"的指路。
-
----
-
-## 架构约束(不要违反)
-
-1. **对外消息默认存草稿,不自动发。** 所有对租客/维修师傅的消息一律存为 Gmail
-   草稿,等人工点发送。给房东本人的日报和汇总自动发。
-
-   **自动发的例外(仅此三类):**
-   - 索要照片的短信(零风险,说错了最多再问一次)
-   - 给房东本人的日报、汇总
-   - **房租催缴短信** —— 房东 2026-08-31 明确要求改为自动发送,
-     覆盖了本条原先的"绝不自动发送"。实现在 `main.py` 的 `rent_cycle`。
-     催缴文案是 `rent.py` 里的确定性模板,不经过模型。
-     **不生成 14 天法定通知** —— 短信不构成法定送达,那一步必须走线下。
-
-   `DRY_RUN=true` 时所有发送只打日志。第一次对真实邮箱跑务必开着。
-
-2. **有财务或法律后果的判断必须写成确定性代码,不能交给 prompt。**
-   金额比对、"验证通过才发回执" 这类规则用 `if` 实现,不写进 instruction。
-   参考 `payment.py` 里的 `verify_payment` 和 `verification_router`。
-
-3. **付款回执措辞:**"已收到你的付款通知",不是"已确认到账"。
-   agent 无法验证 PayPal 真实到账,台账里 `claimed` 和 `confirmed` 是两个状态。
-
-4. **agent 保持无状态。** 等照片这类等待通过 Firestore 状态 + Cloud Scheduler
-   下一轮轮询实现,不要在 agent 内部循环等待(会让 Cloud Run 容器常驻烧钱)。
-
-5. **PayPal 是 mock。** 隔离在 `payment.py` 的 `_lookup_transactions()` 单个函数里,
-   读 `fixtures/paypal_transactions.json`。不要把 mock 逻辑扩散到别处。
+New wording rule → put it in `skills/tenant-sms/references/`, not in an
+instruction. Instructions should only point at which reference to read.
 
 ---
 
-## 渠道架构
+## Architectural constraints (do not violate)
 
-**一切都走 Gmail API,只需一套 OAuth。**
+1. **Outbound messages are drafts by default, not auto-sent.** Every message to
+   a tenant or a contractor is saved as a Gmail draft and waits for a human to
+   hit send. Daily digests and summaries addressed to the landlord are sent
+   automatically.
 
-| 方向 | 通道 | Gmail 里怎么识别 |
+   **Auto-send exceptions (these three only):**
+   - Texts asking for photos (zero risk; worst case you ask again)
+   - Daily digests and summaries to the landlord themselves
+   - **Rent collection texts** — on 2026-08-31 the landlord explicitly asked for
+     these to be auto-sent, overriding the original "never auto-send" rule here.
+     Implemented in `rent_cycle` in `main.py`. The collection copy comes from
+     deterministic templates in `rent.py` and never passes through the model.
+     **No 14-day statutory notice is generated** — an SMS does not constitute
+     valid service, so that step must happen offline.
+
+   With `DRY_RUN=true` every send only logs. Keep it on for the first run
+   against a real mailbox.
+
+2. **Any judgment with financial or legal consequences must be deterministic
+   code, not a prompt.** Amount comparison and rules like "only send a receipt
+   after verification passes" are implemented with `if`, not written into an
+   instruction. See `verify_payment` and `verification_router` in `payment.py`.
+
+3. **Receipt wording follows the verification result** (landlord's requirement,
+   2026-09-01, superseding the earlier "only ever say we received your payment
+   notice" rule):
+   - `verify_payment` found the deposit (status=verified / has_recent_match=true)
+     → the receipt **explicitly states** that PayPal was checked and the payment
+     was found. Amounts and dates come strictly from the code's verification
+     result (`found_amount` / `found_date` / `recent_matches`); the model invents
+     no numbers. Settled-in-full conclusions such as "account settled" remain
+     forbidden
+   - Not found → say only "we have received your payment notice / we don't see it
+     yet", never implying the money arrived
+   - In the ledger `claimed` and `confirmed` remain two states; it counts as
+     confirmed only when the landlord hits send
+
+4. **The agent stays stateless.** Waiting states such as "waiting for photos" are
+   implemented with Firestore state plus the next Cloud Scheduler poll. Never
+   loop and wait inside the agent — that keeps a Cloud Run container alive and
+   burns money.
+
+5. **PayPal is mocked.** The mock is isolated in the single function
+   `_lookup_transactions()` in `payment.py`, which reads
+   `fixtures/paypal_transactions.json`. Do not let mock logic spread elsewhere.
+
+---
+
+## Channel architecture
+
+**Everything goes through the Gmail API, so only one OAuth setup is needed.**
+
+| Direction | Channel | How to recognize it in Gmail |
 |---|---|---|
-| 租客发短信 | Google Voice 转发到邮箱 | `from:txt.voice.google.com` |
-| 回短信给租客 | 回复那封 Voice 邮件 | reply |
-| 租客发照片/视频 | 租客自己的邮箱 | `from:<租客邮箱>` + 附件 |
+| Tenant sends an SMS | Google Voice forwards to the mailbox | `from:txt.voice.google.com` |
+| Reply by SMS to a tenant | Reply to that Voice email | reply |
+| Tenant sends photos/video | The tenant's own mailbox | `from:<tenant email>` + attachment |
 
-Google Voice 没有公开 API。邮件转发格式是它自己定的,不是正式接口 ——
-**解析逻辑必须独立成一个函数**,Google 改版时只改一处。
-
----
-
-## 业务事实
-
-- 5 个单间,每间 $1000/月
-- **应付日逐户不同**,写在 `fixtures/tenants.json` 的 `rent_due_day`
-  (1F-A/1F-B 是 1 号,2F-A/2F-B 是 3 号,3F-A 是 5 号)。
-  金额同样逐户取 `rent_amount`,不要用全局常量。
-- 租客通过 PayPal 付款后发短信告知金额,房东回短信确认作为回执
-- 报修通过短信,描述不清时索要照片/视频(走邮件)
-- 房东不常查邮件,**日报必须发短信**
+Google Voice has no public API. The forwarded-email format is its own convention,
+not a documented interface — so **the parsing logic must live in its own
+function**, so that a Google format change only requires one edit.
 
 ---
 
-## 开发环境
+## Business facts
+
+- 5 rooms, $1000/month each
+- **The due day differs per unit**, recorded as `rent_due_day` in
+  `fixtures/tenants.json` (1F-A/1F-B on the 1st, 2F-A/2F-B on the 3rd, 3F-A on
+  the 5th). Amounts likewise come per-unit from `rent_amount` — never use a
+  global constant.
+- Tenants pay via PayPal and then text the amount; the landlord's reply text
+  serves as the receipt
+- Maintenance is reported by text; when the description is unclear, ask for
+  photos/video (which arrive by email)
+- The landlord rarely checks email, so **the daily digest must go out as an SMS**
+
+---
+
+## Development environment
 
 ```bash
 source .venv/bin/activate
-adk web              # 在项目根目录跑,不要 cd 进 the_super/
+adk web              # run from the project root, do not cd into the_super/
 ```
 
-`.env` 在 `the_super/` 里,包含 `GOOGLE_GENAI_USE_ENTERPRISE=FALSE`
-和 `GOOGLE_API_KEY`(AI Studio 免费 key,非 Vertex)。
+`.env` lives in `the_super/` and contains `GOOGLE_GENAI_USE_ENTERPRISE=FALSE`
+and `GOOGLE_API_KEY` (an AI Studio free key, not Vertex).
 
 ---
 
-## 实现顺序
+## Implementation order
 
-Phase 1(必须):Gmail 读取 → 分类路由 → 付款分支 → 日报
-Phase 2(核心亮点):维修定级 + 描述不清时索要照片
-Phase 3(加分):跨渠道关联附件 + Gemini 看图
-Phase 4(有余力):派单简报、房租周期催缴
+Phase 1 (required): read Gmail → classify and route → payment branch → daily digest
+Phase 2 (the core highlight): maintenance triage + requesting photos when unclear
+Phase 3 (bonus): cross-channel attachment correlation + Gemini image understanding
+Phase 4 (if time allows): dispatch briefs, rent-cycle collection
 
-**时间紧就砍 Phase 3/4。** 周六必须留一整天录 demo 视频。
+**If time is short, cut Phase 3/4.** Saturday must be left entirely free for
+recording the demo video.
 
 ---
 
-## 演示注意
+## Demo notes
 
-录屏前把租客姓名、电话、邮箱、真实门牌号全部替换成假数据。
-提交说明里必须明确标注 PayPal 验证是 mock。
+Before recording, replace every tenant name, phone number, email address, and
+real unit number with fake data.
+The submission notes must state clearly that PayPal verification is mocked.
