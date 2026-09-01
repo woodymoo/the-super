@@ -1,0 +1,16 @@
+{
+  "_comment": [
+    "复制成 tenants.json 填真实数据。tenants.json 已在 .gitignore 里,不会被提交。",
+    "rent_due_day —— 该租客合同约定的每月应付日(1-28)。不同租客可以不同。",
+    "  超过当月天数时按当月最后一天处理(见 tenants.rent_due_date)。",
+    "  限制在 1-28 是为了避免 2 月的歧义;真有 29/30/31 号的合同再放宽。",
+    "rent_amount —— 该租客的月租,verify_payment 按这个值比对,不用全局常量。"
+  ],
+  "tenants": [
+    {"room_id": "1F-A", "name": "Tenant A", "phone": "+1 (917) 555-0101", "email": "tenant.a@example.com", "rent_amount": 1000.00, "rent_due_day": 1},
+    {"room_id": "1F-B", "name": "Tenant B", "phone": "+1 (917) 555-0102", "email": "tenant.b@example.com", "rent_amount": 1000.00, "rent_due_day": 1},
+    {"room_id": "2F-A", "name": "Tenant C", "phone": "+1 (917) 555-0103", "email": "tenant.c@example.com", "rent_amount": 1000.00, "rent_due_day": 3},
+    {"room_id": "2F-B", "name": "Tenant D", "phone": "+1 (917) 555-0104", "email": "tenant.d@example.com", "rent_amount": 1000.00, "rent_due_day": 3},
+    {"room_id": "3F-A", "name": "Tenant E", "phone": "+1 (917) 555-0105", "email": "tenant.e@example.com", "rent_amount": 1000.00, "rent_due_day": 5}
+  ]
+}

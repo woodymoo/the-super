@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+credentials.json
+token.json
+the_super/fixtures/ledger.json
+the_super/fixtures/tickets.json
+the_super/fixtures/history_cursor.json
+the_super/fixtures/sample_voice_email.txt
+the_super/fixtures/tenants.json
+the_super/fixtures/paypal_transactions.json
+the_super/fixtures/threads.json
+the_super/fixtures/tenants.real.json.bak
+the_super/.adk/
+docs/*.bak

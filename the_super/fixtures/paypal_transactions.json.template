@@ -1,0 +1,13 @@
+{
+  "_comment": [
+    "Mock PayPal 账本。payer_email 必须和 tenants.json 里的 email 一致,",
+    "否则 verify_payment / check_rent 会一律判成 not_found。",
+    "真实数据版本(paypal_transactions.json)已 gitignore —— 它含真实邮箱。",
+    "用 `python -m the_super.fixtures_gen` 按当前名册重新生成。"
+  ],
+  "2026-09": [
+    {"txn_id": "MOCK-9A03", "payer_email": "tenant.a@example.com", "amount": 1000.00, "date": "2026-09-01T08:47:00-04:00", "note": "按时全额"},
+    {"txn_id": "MOCK-9B22", "payer_email": "tenant.b@example.com", "amount": 600.00,  "date": "2026-09-01T19:33:00-04:00", "note": "少付"},
+    {"txn_id": "MOCK-9D71", "payer_email": "tenant.d@example.com", "amount": 1000.00, "date": "2026-09-06T11:20:00-04:00", "note": "逾期全额"}
+  ]
+}
