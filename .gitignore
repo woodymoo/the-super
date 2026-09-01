@@ -14,3 +14,10 @@ the_super/fixtures/threads.json
 the_super/fixtures/tenants.real.json.bak
 the_super/.adk/
 docs/*.bak
+
+# test / tooling caches
+.pytest_cache/
+
+# never commit backups of anything -- tenants.real.json.bak was one keystroke
+# away from being staged
+*.bak
